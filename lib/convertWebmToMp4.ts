@@ -1,12 +1,9 @@
 /**
  * convertWebmToMp4 — 브라우저 전용 WebM → MP4(H.264) 변환
  *
- * @ffmpeg/ffmpeg v0.12+ 멀티스레드 빌드를 사용.
- * SharedArrayBuffer는 next.config.ts의 COEP/COOP 헤더로 활성화된다.
- *
- * FFmpeg 인스턴스는 모듈 스코프 싱글턴으로 관리:
- *  - 첫 호출 시 CDN에서 core-mt WASM 로드 (~8MB, 이후 캐싱)
- *  - 동시 호출이 오더라도 하나의 Promise로 수렴 (중복 로드 방지)
+ * @ffmpeg/ffmpeg v0.12 + @ffmpeg/core 0.12.6 단일스레드 빌드 사용.
+ * SharedArrayBuffer 불필요 → 모든 환경에서 안정적으로 동작.
+ * CDN: unpkg.com umd 경로 (ESM 아님 — WASM 경로 차이 있음)
  */
 
 import { FFmpeg } from "@ffmpeg/ffmpeg";
@@ -22,13 +19,12 @@ async function getFFmpeg(): Promise<FFmpeg> {
 
   _loadPromise = (async () => {
     const ff = new FFmpeg();
-    // @ffmpeg/core-mt v0.12.6 — 멀티스레드 빌드
-    // dist/esm/ 경로: ES 모듈 + SharedArrayBuffer worker 포함
-    const base = "https://unpkg.com/@ffmpeg/core-mt@0.12.6/dist/esm";
+    // @ffmpeg/core v0.12.6 — 단일스레드 빌드 (SharedArrayBuffer 불필요)
+    // umd 경로: 브라우저 직접 로드용 번들
+    const base = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd";
     await ff.load({
-      coreURL:   await toBlobURL(`${base}/ffmpeg-core.js`,        "text/javascript"),
-      wasmURL:   await toBlobURL(`${base}/ffmpeg-core.wasm`,      "application/wasm"),
-      workerURL: await toBlobURL(`${base}/ffmpeg-core.worker.js`, "text/javascript"),
+      coreURL: await toBlobURL(`${base}/ffmpeg-core.js`,   "text/javascript"),
+      wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, "application/wasm"),
     });
     _ffmpeg = ff;
     return ff;

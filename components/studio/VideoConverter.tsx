@@ -58,7 +58,11 @@ export default function VideoConverter() {
       setStatus("done");
     } catch (err) {
       console.error("[VideoConverter] 변환 실패:", err);
-      setErrorMsg(err instanceof Error ? err.message : "알 수 없는 오류");
+      // FFmpeg는 string을 throw하기도 함 → String() 으로 안전하게 변환
+      const msg = err instanceof Error
+        ? (err.message || err.toString())
+        : String(err);
+      setErrorMsg(msg);
       setStatus("error");
     }
   }, [file]);
@@ -131,13 +135,19 @@ export default function VideoConverter() {
       {isConverting && (
         <div className="w-full max-w-sm">
           <div className="flex justify-between text-xs text-zinc-500 mb-1">
-            <span>변환 중... (브라우저를 닫지 마세요)</span>
-            <span>{progress}%</span>
+            <span>
+              {status === "loading"
+                ? "FFmpeg 로딩 중... (최초 1회, ~10MB)"
+                : "변환 중... (브라우저를 닫지 마세요)"}
+            </span>
+            {status === "converting" && <span>{progress}%</span>}
           </div>
           <div className="w-full h-2 bg-zinc-800 rounded-full overflow-hidden">
             <div
-              className="h-full bg-violet-600 rounded-full transition-all duration-300"
-              style={{ width: `${progress}%` }}
+              className={`h-full rounded-full transition-all duration-300 ${
+                status === "loading" ? "bg-zinc-600 animate-pulse w-full" : "bg-violet-600"
+              }`}
+              style={status === "converting" ? { width: `${progress}%` } : undefined}
             />
           </div>
         </div>
