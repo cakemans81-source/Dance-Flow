@@ -79,9 +79,67 @@ export async function saveMotion(
     .single();
 
   if (error) {
-    // Supabase 에러 코드를 포함한 상세 메시지
     throw new Error(`[Supabase Insert] ${error.message} (code: ${error.code})`);
   }
 
   return { id: data.id };
+}
+
+// ── 최근 모션 목록 조회 ───────────────────────────────────────────────────
+export type MotionSummary = {
+  id: string;
+  name: string;
+  created_at: string;
+};
+
+export async function getRecentMotions(limit = 3): Promise<MotionSummary[]> {
+  const supabase = getSupabase();
+
+  const { data, error } = await supabase
+    .from("motions")
+    .select("id, name, created_at")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`[Supabase Query] ${error.message} (code: ${error.code})`);
+  }
+
+  return data ?? [];
+}
+
+// ── 디렉팅 모드용 전체 목록 조회 ─────────────────────────────────────────
+export async function getMotionSummaries(limit = 50): Promise<MotionSummary[]> {
+  const supabase = getSupabase();
+
+  const { data, error } = await supabase
+    .from("motions")
+    .select("id, name, created_at")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`[Supabase Query] ${error.message} (code: ${error.code})`);
+  }
+
+  return data ?? [];
+}
+
+// ── 모션 전체 데이터 단건 조회 (motion_data 포함) ────────────────────────
+export async function getMotionById(
+  id: string
+): Promise<MotionRow & { id: string }> {
+  const supabase = getSupabase();
+
+  const { data, error } = await supabase
+    .from("motions")
+    .select("id, name, motion_data, created_at")
+    .eq("id", id)
+    .single();
+
+  if (error) {
+    throw new Error(`[Supabase Query] ${error.message} (code: ${error.code})`);
+  }
+
+  return data;
 }

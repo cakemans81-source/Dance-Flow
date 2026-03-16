@@ -49,3 +49,15 @@ body {
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: #555;
 }
+
+/* 토스트 알림 애니메이션 */
+@keyframes toast-show {
+  0%   { opacity: 0; transform: translateY(16px); }
+  12%  { opacity: 1; transform: translateY(0); }
+  80%  { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-8px); }
+}
+
+.animate-toast {
+  animation: toast-show 3s ease forwards;
+}

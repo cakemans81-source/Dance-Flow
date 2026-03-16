@@ -36,6 +36,11 @@ yarn-error.log*
 # vercel
 .vercel
 
+# FFmpeg WASM (CDN에서 로드하므로 불필요 — 24MB 대용량)
+/public/ffmpeg/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+.vercel
