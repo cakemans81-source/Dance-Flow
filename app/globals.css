@@ -1,8 +1,13 @@
 @import "tailwindcss";
 
+/* 앱 전체를 다크 테마로 고정 (prefers-color-scheme 무시) */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0a0a0a;
+  --foreground: #ededed;
+  --panel-bg: #111111;
+  --panel-border: #2a2a2a;
+  --accent: #7c3aed; /* violet-700 */
+  --accent-hover: #6d28d9;
 }
 
 @theme inline {
@@ -12,15 +17,35 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
+html,
 body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  /* 브라우저 스크롤바가 레이아웃을 밀지 않도록 */
+  overflow: hidden;
+}
+
+/* 커스텀 스크롤바 (컨트롤 패널 내부용) */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 2px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #555;
 }
