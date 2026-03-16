@@ -72,6 +72,7 @@ export async function convertWebmToMp4(
     const exitCode = await ff.exec([
       "-y",                  // 출력 파일 덮어쓰기 허용
       "-i",       "in.webm",
+      "-vf",      "scale=trunc(iw/2)*2:trunc(ih/2)*2", // 홀수 해상도 → 짝수 강제 (libx264 필수 조건)
       "-c:v",     "libx264",
       "-preset",  "ultrafast",
       "-r",       "30",      // VFR → CFR 30fps 강제 (libx264 VFR 거부 방지)
