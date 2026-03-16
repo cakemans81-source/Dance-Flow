@@ -52,8 +52,15 @@ export async function convertWebmToMp4(
 
   try {
     await ff.writeFile("in.webm", await fetchFile(webmBlob));
-    await ff.exec([
+
+    // -map 0:v:0        → 첫 번째 비디오 스트림만 선택
+    // -map 0:a:0?       → 오디오가 있으면 포함, 없어도 에러 없음 (? = optional)
+    // -y                → 출력 파일 덮어쓰기 허용
+    const exitCode = await ff.exec([
+      "-y",
       "-i",        "in.webm",
+      "-map",      "0:v:0",
+      "-map",      "0:a:0?",
       "-c:v",      "libx264",
       "-preset",   "ultrafast",
       "-pix_fmt",  "yuv420p",
@@ -62,14 +69,22 @@ export async function convertWebmToMp4(
       "out.mp4",
     ]);
 
+    if (exitCode !== 0) {
+      throw new Error(`FFmpeg 인코딩 실패 (exit code ${exitCode})`);
+    }
+
     const data = await ff.readFile("out.mp4");
 
-    // Uint8Array<ArrayBufferLike> → plain Uint8Array (SharedArrayBuffer 타입 에러 우회)
-    const bytes = data instanceof Uint8Array
-      ? Uint8Array.from(data)
-      : new TextEncoder().encode(data as string);
+    // SharedArrayBuffer 기반 Uint8Array → 일반 ArrayBuffer로 복사 (Blob 생성 가능)
+    const raw = data instanceof Uint8Array ? data : new TextEncoder().encode(data as string);
+    const bytes = new Uint8Array(new ArrayBuffer(raw.byteLength));
+    bytes.set(raw);
 
-    return new Blob([bytes], { type: "video/mp4" });
+    if (bytes.byteLength === 0) {
+      throw new Error("변환된 파일이 비어 있습니다. 입력 파일을 확인하세요.");
+    }
+
+    return new Blob([bytes.buffer], { type: "video/mp4" });
   } finally {
     if (onProgress) ff.off("progress", progressHandler);
     ff.deleteFile("in.webm").catch(() => {});
