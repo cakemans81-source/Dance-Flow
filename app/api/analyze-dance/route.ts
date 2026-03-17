@@ -1,26 +1,29 @@
 /**
  * POST /api/analyze-dance
  *
- * 3장의 JPEG 썸네일(base64)을 받아 Gemini Vision으로 댄스를 분석한다.
- * 응답: { genre: string, vibe: string, difficulty: string, tempo: string }
+ * 3×3 그리드 이미지(시각) + 오디오 클립(청각)을 받아
+ * Gemini Vision으로 댄스를 시청각 통합 분석한다.
+ * 응답: { genre, vibe, difficulty, tempo }
  */
 import { GoogleGenAI, Type } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
 
-const MODEL = "gemini-3.1-flash-lite-preview"; // 경량 고속 모델 (단순 JSON 분석 최적)
+const MODEL = "gemini-3.1-flash-lite-preview"; // 경량 고속 모델
 
 const SYSTEM_INSTRUCTION =
-  "너는 전 세계의 모든 댄스 장르를 꿰뚫고 있는 전문 안무가야. " +
-  "주어진 3장의 연속된 사진을 보고 댄서의 옷차림, 동작의 형태, 움직임의 복잡도와 속도를 종합적으로 분석해.";
+  "너는 세계 최고의 안무가야. " +
+  "첨부된 오디오 파일의 비트와 리듬을 '듣고', " +
+  "3×3 그리드로 분할된 5초간의 동작 변화를 '봐서' 춤을 분석해 줘. " +
+  "댄서의 옷차림, 동작의 형태, 움직임의 복잡도와 속도를 종합적으로 판단해.";
 
 const USER_PROMPT =
-  "이 사진들은 5초짜리 춤 영상의 흐름이야. " +
-  "이 춤의 장르(예: 힙합, Kpop, 틱톡, 스트릿, 팝핑 등)와 " +
-  "분위기(예: 파워풀, 그루비, 바운스, 웨이브 등)를 분석하고, " +
-  "동작의 복잡도를 보고 난이도(상/중/하), " +
-  "움직임의 속도감을 보고 템포(빠름/보통/느림)도 판별해 줘.";
+  "이 영상은 5초짜리 춤 클립이야. " +
+  "오디오에서 비트와 리듬감을 파악하고, 9개 프레임 그리드에서 동작 흐름을 읽어서 " +
+  "장르(예: 힙합, Kpop, 틱톡, 스트릿, 팝핑 등), " +
+  "분위기(예: 파워풀, 그루비, 바운스, 웨이브 등), " +
+  "동작 복잡도 기반 난이도(상/중/하), " +
+  "움직임 속도감 기반 템포(빠름/보통/느림)를 분석해 줘.";
 
-// JSON 응답 스키마 — Gemini가 무조건 이 구조로만 응답하도록 강제
 const RESPONSE_SCHEMA = {
   type: Type.OBJECT,
   properties: {
@@ -41,26 +44,29 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let images: string[];
+  let gridImage: string;
+  let audioData: { data: string; mimeType: string } | null;
+
   try {
-    ({ images } = await req.json());
+    ({ gridImage, audioData } = await req.json());
   } catch {
     return NextResponse.json({ error: "요청 본문 파싱 실패" }, { status: 400 });
   }
 
-  if (!Array.isArray(images) || images.length === 0) {
-    return NextResponse.json(
-      { error: "images 배열이 비어 있습니다." },
-      { status: 400 },
-    );
+  if (!gridImage) {
+    return NextResponse.json({ error: "gridImage가 없습니다." }, { status: 400 });
   }
 
   const ai = new GoogleGenAI({ apiKey });
 
-  // 이미지 파트 + 텍스트 프롬프트를 하나의 user 턴으로 구성
-  const imageParts = images.map((b64) => ({
-    inlineData: { mimeType: "image/jpeg" as const, data: b64 },
-  }));
+  // 시각(그리드 이미지) + 청각(오디오, 없으면 생략) + 텍스트 프롬프트
+  const parts: object[] = [
+    { inlineData: { mimeType: "image/jpeg", data: gridImage } },
+    ...(audioData
+      ? [{ inlineData: { mimeType: audioData.mimeType, data: audioData.data } }]
+      : []),
+    { text: USER_PROMPT },
+  ];
 
   try {
     const response = await ai.models.generateContent({
@@ -70,15 +76,10 @@ export async function POST(req: NextRequest) {
         responseMimeType: "application/json",
         responseSchema: RESPONSE_SCHEMA,
       },
-      contents: [
-        {
-          role: "user",
-          parts: [...imageParts, { text: USER_PROMPT }],
-        },
-      ],
+      contents: [{ role: "user", parts }],
     });
 
-    const raw = response.text ?? "";
+    const raw    = response.text ?? "";
     const parsed = JSON.parse(raw) as { genre: string; vibe: string; difficulty: string; tempo: string };
 
     if (!parsed.genre || !parsed.vibe || !parsed.difficulty || !parsed.tempo) {
@@ -89,9 +90,6 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[analyze-dance] Gemini 호출 실패:", msg);
-    return NextResponse.json(
-      { error: `Gemini 분석 실패: ${msg}` },
-      { status: 502 },
-    );
+    return NextResponse.json({ error: `Gemini 분석 실패: ${msg}` }, { status: 502 });
   }
 }

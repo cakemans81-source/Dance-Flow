@@ -12,7 +12,7 @@ import {
   type MotionFrame,
   type MotionSummary,
 } from "@/lib/supabase";
-import { extractThumbnails } from "@/lib/videoUtils";
+import { extractGridThumbnails, extractAudio } from "@/lib/videoUtils";
 import type { Landmark3D } from "@/hooks/usePose";
 import type { CaptureBackground } from "./PoseCanvas3D";
 
@@ -490,11 +490,15 @@ export default function ControlPanel({
     setAnalyzeError(null);
 
     try {
-      const images = await extractThumbnails(video, 3);
+      // 시각(9컷 그리드) + 청각(오디오) 병렬 추출
+      const [gridImage, audioData] = await Promise.all([
+        extractGridThumbnails(video),
+        extractAudio(video),
+      ]);
       const res = await fetch("/api/analyze-dance", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ images }),
+        body: JSON.stringify({ gridImage, audioData }),
       });
 
       if (!res.ok) {
