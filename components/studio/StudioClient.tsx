@@ -18,10 +18,12 @@ import { useState, useCallback, useRef } from "react";
 import ControlPanel from "./ControlPanel";
 import PreviewCanvas from "./PreviewCanvas";
 import VideoConverter from "./VideoConverter";
+import MotionMixer from "./MotionMixer";
 import type { Landmark3D } from "@/hooks/usePose";
 import type { CaptureBackground } from "./PoseCanvas3D";
 
 type Mode = "extract" | "direct" | "toolbox";
+type ToolboxTab = "converter" | "mixer";
 
 export default function StudioClient() {
   // 두 패널이 공유하는 실시간 포즈 데이터
@@ -55,6 +57,7 @@ export default function StudioClient() {
 
   // ── 활성 모드 (우측 패널 전환용) ─────────────────────────────────────────
   const [activeMode, setActiveMode] = useState<Mode>("extract");
+  const [toolboxTab, setToolboxTab] = useState<ToolboxTab>("converter");
 
   return (
     <main className="flex flex-col lg:flex-row h-screen w-screen overflow-hidden bg-[#0a0a0a]">
@@ -72,10 +75,30 @@ export default function StudioClient() {
         />
       </aside>
 
-      {/* 우측: Toolbox 탭이면 변환기, 나머지는 3D 프리뷰 캔버스 */}
-      <section className="flex-1 min-w-0 h-[50vh] lg:h-full relative">
+      {/* 우측: Toolbox 탭이면 변환기/믹서, 나머지는 3D 프리뷰 캔버스 */}
+      <section className="flex-1 min-w-0 h-[50vh] lg:h-full relative flex flex-col">
         {activeMode === "toolbox" ? (
-          <VideoConverter />
+          <div className="flex flex-col h-full">
+            {/* 서브탭 */}
+            <div className="flex-shrink-0 flex gap-0.5 p-1.5 bg-zinc-950 border-b border-zinc-800">
+              {(["converter", "mixer"] as ToolboxTab[]).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setToolboxTab(tab)}
+                  className={`flex-1 py-1.5 rounded-md text-xs font-semibold transition-all ${
+                    toolboxTab === tab
+                      ? "bg-zinc-800 text-zinc-100"
+                      : "text-zinc-500 hover:text-zinc-300"
+                  }`}
+                >
+                  {tab === "converter" ? "WebM→MP4 변환기" : "🎭 모션 믹서"}
+                </button>
+              ))}
+            </div>
+            <div className="flex-1 overflow-hidden">
+              {toolboxTab === "converter" ? <VideoConverter /> : <MotionMixer />}
+            </div>
+          </div>
         ) : (
           <PreviewCanvas
             landmarks={poseLandmarks}

@@ -187,6 +187,21 @@ export async function getMotionSummaries(limit = 50): Promise<MotionSummary[]> {
   return data ?? [];
 }
 
+// ── pose_data 단건 조회 ────────────────────────────────────────────────────
+// pose_data 컬럼이 없는 구형 레코드는 null 반환.
+// 호출자에서 buildPoseData(motion_data)로 폴백 처리 필요.
+export async function getPoseDataById(id: string): Promise<PoseData | null> {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("motions")
+    .select("pose_data")
+    .eq("id", id)
+    .single();
+  if (error) throw new Error(`[Supabase Query] ${error.message} (code: ${error.code})`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (data as any)?.pose_data ?? null;
+}
+
 // ── 모션 삭제 ─────────────────────────────────────────────────────────────
 export async function deleteMotion(id: string): Promise<void> {
   const supabase = getSupabase();
