@@ -33,17 +33,39 @@ const POSE_CONNECTIONS: [number, number][] = [
   [23,25],[25,27],[27,29],[27,31],[29,31],
   [24,26],[26,28],[28,30],[28,32],[30,32],
 ];
-const LEFT_IDX  = new Set([1,2,3,7,11,13,15,17,19,21,23,25,27,29,31]);
-const RIGHT_IDX = new Set([4,5,6,8,12,14,16,18,20,22,24,26,28,30,32]);
 
-// ── 스켈레톤 렌더러 ───────────────────────────────────────────────────────
+// ── 스켈레톤 렌더러 (두꺼운 실루엣 — Kling AI 인식용) ──────────────────────
+// 배경: 완전한 검정 / 선: 완전한 흰색 / 신체 부위별 차등 두께
+// lineCap·lineJoin = round → 관절이 자연스럽게 이어지는 미쉐린 맨 형태
+//
+// 두께 기준:
+//   몸통(어깨·골반 사각형)    : 80
+//   윗팔 / 허벅지             : 50
+//   아래팔 / 종아리           : 35
+//   머리(nose 중심 채운 원)   : 반지름 40
+const THICK_CONNECTIONS: [number, number, number][] = [
+  // 몸통
+  [11, 12, 80], [23, 24, 80], [11, 23, 80], [12, 24, 80],
+  // 윗팔
+  [11, 13, 50], [12, 14, 50],
+  // 아래팔
+  [13, 15, 35], [14, 16, 35],
+  // 허벅지
+  [23, 25, 50], [24, 26, 50],
+  // 종아리
+  [25, 27, 35], [26, 28, 35],
+];
+
 function drawSkeleton(
   ctx: CanvasRenderingContext2D,
   w: number,
   h: number,
   frame: CompactFrame,
 ) {
-  ctx.clearRect(0, 0, w, h);
+  // 완전한 검은 배경
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, w, h);
+
   const lm = frame.lm;
   if (!lm || lm.length < 33) return;
 
@@ -51,25 +73,25 @@ function drawSkeleton(
   const py  = (i: number) => lm[i][1] * h;
   const vis = (i: number) => lm[i]?.[3] ?? 0;
 
-  // ── 연결선
-  for (const [a, b] of POSE_CONNECTIONS) {
+  ctx.lineCap     = "round";
+  ctx.lineJoin    = "round";
+  ctx.strokeStyle = "#ffffff";
+
+  // ── 신체 부위별 두꺼운 선
+  for (const [a, b, lw] of THICK_CONNECTIONS) {
     if (vis(a) < 0.3 || vis(b) < 0.3) continue;
-    const isLeft  = LEFT_IDX.has(a) || LEFT_IDX.has(b);
-    const isRight = RIGHT_IDX.has(a) || RIGHT_IDX.has(b);
     ctx.beginPath();
-    ctx.strokeStyle = isLeft ? "#a78bfa" : isRight ? "#f472b6" : "#a1a1aa";
-    ctx.lineWidth   = 2;
+    ctx.lineWidth = lw;
     ctx.moveTo(px(a), py(a));
     ctx.lineTo(px(b), py(b));
     ctx.stroke();
   }
 
-  // ── 관절 점
-  for (let i = 0; i < lm.length; i++) {
-    if (vis(i) < 0.3) continue;
+  // ── 머리: nose(0) 중심으로 꽉 찬 흰 원
+  if (vis(0) >= 0.3) {
     ctx.beginPath();
-    ctx.fillStyle = i === 0 ? "#facc15" : "#ffffff"; // 코(0)는 노란색
-    ctx.arc(px(i), py(i), i <= 10 ? 2 : 3, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.arc(px(0), py(0), 40, 0, Math.PI * 2);
     ctx.fill();
   }
 }
