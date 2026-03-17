@@ -4,7 +4,7 @@ import { useRef, useState, useCallback, useEffect } from "react";
 import VideoPlayer from "./VideoPlayer";
 import TimelineEditor, { type Segment } from "./TimelineEditor";
 import RecordingControls from "./RecordingControls";
-import RecentMotions from "./RecentMotions";
+import MotionLibrary from "./MotionLibrary";
 import {
   saveMotion,
   getMotionSummaries,
@@ -1307,9 +1307,9 @@ export default function ControlPanel({
             )}
           </div>
 
-          {/* ── 최근 저장 디버그 패널 ───────────────────────────────────── */}
+          {/* ── 모션 도서관 ────────────────────────────────────────────── */}
           <div className="flex-shrink-0 pt-2 border-t border-zinc-800 pb-4">
-            <RecentMotions refreshKey={saveRefreshKey} />
+            <MotionLibrary refreshKey={saveRefreshKey} />
           </div>
         </>
       )}

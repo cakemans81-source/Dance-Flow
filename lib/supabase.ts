@@ -125,6 +125,15 @@ export async function getMotionSummaries(limit = 50): Promise<MotionSummary[]> {
   return data ?? [];
 }
 
+// ── 모션 삭제 ─────────────────────────────────────────────────────────────
+export async function deleteMotion(id: string): Promise<void> {
+  const supabase = getSupabase();
+  const { error } = await supabase.from("motions").delete().eq("id", id);
+  if (error) {
+    throw new Error(`[Supabase Delete] ${error.message} (code: ${error.code})`);
+  }
+}
+
 // ── 모션 전체 데이터 단건 조회 (motion_data 포함) ────────────────────────
 export async function getMotionById(
   id: string
