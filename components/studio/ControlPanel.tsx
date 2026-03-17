@@ -502,8 +502,8 @@ export default function ControlPanel({
         throw new Error(error ?? "서버 오류");
       }
 
-      const { genre, vibe } = await res.json() as { genre: string; vibe: string };
-      setPendingMotionName(`${genre}_${vibe}_자동생성`);
+      const { genre, vibe, tempo, difficulty } = await res.json() as { genre: string; vibe: string; tempo: string; difficulty: string };
+      setPendingMotionName(`${genre}_${vibe}_${tempo}_${difficulty}`);
     } catch (err) {
       setAnalyzeError(err instanceof Error ? err.message : "분석 실패");
     } finally {
