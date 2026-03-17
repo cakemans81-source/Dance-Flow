@@ -12,6 +12,7 @@ import {
   type MotionFrame,
   type MotionSummary,
 } from "@/lib/supabase";
+import { extractThumbnails } from "@/lib/videoUtils";
 import type { Landmark3D } from "@/hooks/usePose";
 import type { CaptureBackground } from "./PoseCanvas3D";
 
@@ -149,6 +150,8 @@ export default function ControlPanel({
   // ── 모션 이름 입력 모달 ─────────────────────────────────────────────────────
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [pendingMotionName, setPendingMotionName] = useState("");
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
 
   // ── Extract 모드: Export 프레임 버퍼 ────────────────────────────────────────
   const exportFramesRef = useRef<MotionFrame[]>([]);
@@ -475,7 +478,38 @@ export default function ControlPanel({
   const handleCancelSave = useCallback(() => {
     setShowSaveModal(false);
     setPendingMotionName("");
+    setAnalyzeError(null);
   }, []);
+
+  // ── Gemini 자동 분석 ─────────────────────────────────────────────────────────
+  const handleGeminiAnalyze = useCallback(async () => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    setIsAnalyzing(true);
+    setAnalyzeError(null);
+
+    try {
+      const images = await extractThumbnails(video, 3);
+      const res = await fetch("/api/analyze-dance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ images }),
+      });
+
+      if (!res.ok) {
+        const { error } = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(error ?? "서버 오류");
+      }
+
+      const { genre, vibe } = await res.json() as { genre: string; vibe: string };
+      setPendingMotionName(`${genre}_${vibe}_자동생성`);
+    } catch (err) {
+      setAnalyzeError(err instanceof Error ? err.message : "분석 실패");
+    } finally {
+      setIsAnalyzing(false);
+    }
+  }, [videoRef]);
 
   // ── Extract 모드: TimelineEditor Export ─────────────────────────────────────
   const handleExport = useCallback(() => {
@@ -999,6 +1033,30 @@ export default function ControlPanel({
             <h3 className="text-sm font-semibold text-zinc-100">댄스 이름 입력</h3>
             <p className="text-xs text-zinc-500 mt-0.5">저장할 모션의 이름을 입력하세요</p>
           </div>
+          {/* Gemini 자동 분석 버튼 */}
+          <button
+            onClick={handleGeminiAnalyze}
+            disabled={isAnalyzing}
+            className="w-full flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold bg-blue-900/60 border border-blue-700/60 text-blue-300 hover:bg-blue-800/70 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {isAnalyzing ? (
+              <>
+                <svg className="animate-spin h-3.5 w-3.5 text-blue-400" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                </svg>
+                Gemini 분석 중…
+              </>
+            ) : (
+              <>🤖 Gemini 자동 분석</>
+            )}
+          </button>
+
+          {/* 분석 에러 메시지 */}
+          {analyzeError && (
+            <p className="text-xs text-red-400 text-center -mt-1">❌ {analyzeError}</p>
+          )}
+
           <input
             autoFocus
             type="text"
