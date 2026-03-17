@@ -7,7 +7,7 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
 
-const MODEL = "gemini-3.1-flash-lite"; // 경량 고속 모델 (단순 JSON 분석 최적)
+const MODEL = "gemini-3.1-flash-lite-preview"; // 경량 고속 모델 (단순 JSON 분석 최적)
 
 const SYSTEM_INSTRUCTION =
   "너는 전 세계의 모든 댄스 장르를 꿰뚫고 있는 전문 안무가야. " +
