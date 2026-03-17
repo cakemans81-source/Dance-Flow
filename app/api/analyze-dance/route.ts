@@ -7,7 +7,7 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
 
-const MODEL = "gemini-3.1-flash"; // Vision 지원 안정 모델
+const MODEL = "gemini-3-flash"; // Vision 지원 안정 모델
 
 const SYSTEM_INSTRUCTION =
   "너는 전 세계의 모든 댄스 장르를 꿰뚫고 있는 전문 안무가야. " +
