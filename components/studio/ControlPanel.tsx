@@ -7,6 +7,7 @@ import RecordingControls from "./RecordingControls";
 import MotionLibrary from "./MotionLibrary";
 import {
   saveMotion,
+  buildPoseData,
   getMotionSummaries,
   getMotionById,
   type MotionFrame,
@@ -461,8 +462,9 @@ export default function ControlPanel({
     setSaveError(null);
 
     try {
-      const { id } = await saveMotion(pendingMotionName.trim(), savedRecording);
-      console.log(`[DanceFlow] 저장 완료 → id: ${id}, name: "${pendingMotionName.trim()}", frames: ${savedRecording.length}`);
+      const poseData = buildPoseData(savedRecording);
+      const { id } = await saveMotion(pendingMotionName.trim(), savedRecording, poseData);
+      console.log(`[DanceFlow] 저장 완료 → id: ${id}, name: "${pendingMotionName.trim()}", frames: ${savedRecording.length}, fps: ${poseData.meta.fps}`);
       setSaveStatus("success");
       setSaveRefreshKey((k) => k + 1);
       onSaveSuccess?.(pendingMotionName.trim());
