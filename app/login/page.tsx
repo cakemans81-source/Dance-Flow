@@ -9,14 +9,14 @@
  */
 
 import { useState, useTransition } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { createBrowserClient } from "@supabase/ssr";
 import { useRouter } from "next/navigation";
 
 const DUMMY_DOMAIN = "@dance-app.local";
 
-// 빌드 타임 env 부재 방지 — 런타임에만 생성
+// createBrowserClient: 세션을 쿠키에 저장 → 미들웨어(SSR)가 감지 가능
 function getSupabase() {
-  return createClient(
+  return createBrowserClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
   );
