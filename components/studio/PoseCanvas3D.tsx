@@ -31,24 +31,64 @@ const NUM_JOINTS = 33;
 const SCALE = 2.5; // MediaPipe 미터 단위 → Three.js 씬 유닛 스케일
 
 const POSE_CONNECTIONS: [number, number][] = [
-  // 얼굴
+  // 얼굴 (idx 0–8)
   [0, 1], [1, 2], [2, 3], [3, 7],
   [0, 4], [4, 5], [5, 6], [6, 8],
   [9, 10],
-  // 어깨
+  // 어깨/몸통 어깨선 (idx 9)
   [11, 12],
-  // 왼팔
+  // 왼팔 (idx 10–15)
   [11, 13], [13, 15], [15, 17], [15, 19], [15, 21], [17, 19],
-  // 오른팔
+  // 오른팔 (idx 16–21)
   [12, 14], [14, 16], [16, 18], [16, 20], [16, 22], [18, 20],
-  // 몸통
+  // 몸통 측면·골반 (idx 22–24)
   [11, 23], [12, 24], [23, 24],
-  // 왼다리
+  // 왼다리 (idx 25–29)
   [23, 25], [25, 27], [27, 29], [29, 31], [27, 31],
-  // 오른다리
+  // 오른다리 (idx 30–34)
   [24, 26], [26, 28], [28, 30], [30, 32], [28, 32],
 ];
 const NUM_CONNECTIONS = POSE_CONNECTIONS.length;
+
+// ── ControlNet OpenPose 표준 컬러 스키마 ──────────────────────────────────────
+// 연결선별 RGB [r,g,b] — 순서는 POSE_CONNECTIONS 인덱스와 1:1 대응
+// 머리 #FF0000 / 몸통 #FF00FF / 왼팔 #0000FF / 오른팔 #00FF00
+// 왼다리 #00FFFF / 오른다리 #FFFF00
+const CONNECTION_COLORS_RGB: [number, number, number][] = [
+  // 얼굴 0–8
+  [1,0,0],[1,0,0],[1,0,0],[1,0,0],
+  [1,0,0],[1,0,0],[1,0,0],[1,0,0],[1,0,0],
+  // 어깨선 9
+  [1,0,1],
+  // 왼팔 10–15
+  [0,0,1],[0,0,1],[0,0,1],[0,0,1],[0,0,1],[0,0,1],
+  // 오른팔 16–21
+  [0,1,0],[0,1,0],[0,1,0],[0,1,0],[0,1,0],[0,1,0],
+  // 몸통 22–24
+  [1,0,1],[1,0,1],[1,0,1],
+  // 왼다리 25–29
+  [0,1,1],[0,1,1],[0,1,1],[0,1,1],[0,1,1],
+  // 오른다리 30–34
+  [1,1,0],[1,1,0],[1,1,0],[1,1,0],[1,1,0],
+];
+
+// 관절(InstancedMesh) 인덱스별 THREE.Color
+const _c = (hex: number) => new THREE.Color(hex);
+const JOINT_COLORS_MAP: Record<number, THREE.Color> = {
+  // 머리 0–10
+  0:_c(0xFF0000),1:_c(0xFF0000),2:_c(0xFF0000),3:_c(0xFF0000),4:_c(0xFF0000),
+  5:_c(0xFF0000),6:_c(0xFF0000),7:_c(0xFF0000),8:_c(0xFF0000),9:_c(0xFF0000),10:_c(0xFF0000),
+  // 몸통(어깨·골반) 11,12,23,24
+  11:_c(0xFF00FF),12:_c(0xFF00FF),23:_c(0xFF00FF),24:_c(0xFF00FF),
+  // 왼팔 13,15,17,19,21
+  13:_c(0x0000FF),15:_c(0x0000FF),17:_c(0x0000FF),19:_c(0x0000FF),21:_c(0x0000FF),
+  // 오른팔 14,16,18,20,22
+  14:_c(0x00FF00),16:_c(0x00FF00),18:_c(0x00FF00),20:_c(0x00FF00),22:_c(0x00FF00),
+  // 왼다리 25,27,29,31
+  25:_c(0x00FFFF),27:_c(0x00FFFF),29:_c(0x00FFFF),31:_c(0x00FFFF),
+  // 오른다리 26,28,30,32
+  26:_c(0xFFFF00),28:_c(0xFFFF00),30:_c(0xFFFF00),32:_c(0xFFFF00),
+};
 
 // ── 좌표 변환 ─────────────────────────────────────────────────────────────────
 // MediaPipe world: X 오른쪽+, Y 아래+, Z 카메라 쪽+
@@ -129,23 +169,9 @@ export default function PoseCanvas3D({ landmarks, isCapturing, captureBackground
     controls.maxPolarAngle = Math.PI * 0.9;
     controls.target.set(0, 0, 0);
 
-    // ── 조명 ─────────────────────────────────────────────────────────────
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    // ── 조명 (MeshBasicMaterial 관절은 조명 무관, 씬 분위기용만 유지) ──────
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
     scene.add(ambientLight);
-
-    const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
-    dirLight.position.set(3, 6, 4);
-    scene.add(dirLight);
-
-    // 보라색 림 라이트 (뒤에서)
-    const rimLight = new THREE.PointLight(0x7c3aed, 1.2, 20);
-    rimLight.position.set(-2, 2, -3);
-    scene.add(rimLight);
-
-    // 바운스 라이트 (아래에서)
-    const bounceLight = new THREE.PointLight(0xa78bfa, 0.4, 10);
-    bounceLight.position.set(0, -2, 2);
-    scene.add(bounceLight);
 
     // ── 바닥 그리드 ───────────────────────────────────────────────────────
     // GridHelper: (크기, 분할수, 중심색, 격자색)
@@ -153,39 +179,41 @@ export default function PoseCanvas3D({ landmarks, isCapturing, captureBackground
     grid.position.y = -1.3;
     scene.add(grid);
 
-    // ── 뼈대 LineSegments ────────────────────────────────────────────────
-    // DynamicDrawUsage: GPU에 "이 버퍼는 자주 변경된다" 힌트 → DYNAMIC_DRAW
+    // ── 뼈대 LineSegments (vertexColors — 부위별 OpenPose 색상) ──────────
     const lineGeo = new THREE.BufferGeometry();
     const linePositions = new Float32Array(NUM_CONNECTIONS * 2 * 3);
     const linePosAttr = new THREE.BufferAttribute(linePositions, 3);
     linePosAttr.setUsage(THREE.DynamicDrawUsage);
     lineGeo.setAttribute("position", linePosAttr);
-    const lineMat = new THREE.LineBasicMaterial({
-      color: 0x7c3aed,
-      transparent: true,
-      opacity: 0.9,
-    });
+
+    // 색상 버퍼: 연결선마다 start·end 정점 2개 × RGB 3채널 (정적 — 한 번만 설정)
+    const lineColorData = new Float32Array(NUM_CONNECTIONS * 2 * 3);
+    for (let i = 0; i < NUM_CONNECTIONS; i++) {
+      const [r, g, b] = CONNECTION_COLORS_RGB[i];
+      lineColorData[i * 6]     = r; lineColorData[i * 6 + 1] = g; lineColorData[i * 6 + 2] = b;
+      lineColorData[i * 6 + 3] = r; lineColorData[i * 6 + 4] = g; lineColorData[i * 6 + 5] = b;
+    }
+    lineGeo.setAttribute("color", new THREE.BufferAttribute(lineColorData, 3));
+
+    const lineMat = new THREE.LineBasicMaterial({ vertexColors: true });
     const lineSegments = new THREE.LineSegments(lineGeo, lineMat);
     scene.add(lineSegments);
 
-    // ── 관절 InstancedMesh ───────────────────────────────────────────────
-    // 33개 구체를 InstancedMesh 단일 드로우콜로 렌더링
-    const sphereGeo = new THREE.SphereGeometry(0.03, 10, 7);
-    const jointMat = new THREE.MeshStandardMaterial({
-      color: 0xa78bfa,
-      emissive: 0x5b21b6,
-      emissiveIntensity: 0.6,
-      roughness: 0.2,
-      metalness: 0.15,
-    });
+    // ── 관절 InstancedMesh (MeshBasicMaterial — 조명 무관, 순수 OpenPose 색) ─
+    const sphereGeo = new THREE.SphereGeometry(0.035, 10, 7);
+    const jointMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
     const instancedMesh = new THREE.InstancedMesh(sphereGeo, jointMat, NUM_JOINTS);
     const tempMatrix = new THREE.Matrix4();
-    // 초기화: 모든 관절을 씬 밖으로 숨김
+    const defaultJointColor = new THREE.Color(0x888888);
+
+    // 모든 관절 초기화: 위치는 씬 밖, 색상은 OpenPose 기준으로 고정
     for (let i = 0; i < NUM_JOINTS; i++) {
       tempMatrix.makeTranslation(0, -999, 0);
       instancedMesh.setMatrixAt(i, tempMatrix);
+      instancedMesh.setColorAt(i, JOINT_COLORS_MAP[i] ?? defaultJointColor);
     }
     instancedMesh.instanceMatrix.needsUpdate = true;
+    instancedMesh.instanceColor!.needsUpdate = true;
     scene.add(instancedMesh);
 
     // ── 반응형 리사이즈 ───────────────────────────────────────────────────
@@ -237,6 +265,7 @@ export default function PoseCanvas3D({ landmarks, isCapturing, captureBackground
       lineMat.dispose();
       sphereGeo.dispose();
       jointMat.dispose();
+      instancedMesh.dispose();
       renderer.dispose();
       // 언마운트 시 녹화 중이었으면 강제 종료
       if (mediaRecorderRef.current?.state !== "inactive") {
