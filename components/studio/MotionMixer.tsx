@@ -23,38 +23,62 @@ import type { CompactFrame } from "@/lib/supabase";
 const CANVAS_W = 480;
 const CANVAS_H = 640;
 
-// ── MediaPipe Pose 33 랜드마크 연결 정의 ──────────────────────────────────
-const POSE_CONNECTIONS: [number, number][] = [
-  [0,1],[1,2],[2,3],[3,7],[0,4],[4,5],[5,6],[6,8],[9,10],
-  [11,12],
-  [11,13],[13,15],[15,17],[15,19],[15,21],[17,19],
-  [12,14],[14,16],[16,18],[16,20],[16,22],[18,20],
-  [11,23],[12,24],[23,24],
-  [23,25],[25,27],[27,29],[27,31],[29,31],
-  [24,26],[26,28],[28,30],[28,32],[30,32],
-];
 
-// ── 스켈레톤 렌더러 (두꺼운 실루엣 — Kling AI 인식용) ──────────────────────
-// 배경: 완전한 검정 / 선: 완전한 흰색 / 신체 부위별 차등 두께
-// lineCap·lineJoin = round → 관절이 자연스럽게 이어지는 미쉐린 맨 형태
+// ── ControlNet OpenPose 표준 컬러 스키마 ──────────────────────────────────
+// Kling AI가 인식하는 DWPose/OpenPose ControlNet 훈련 포맷
 //
-// 두께 기준:
-//   몸통(어깨·골반 사각형)    : 80
-//   윗팔 / 허벅지             : 50
-//   아래팔 / 종아리           : 35
-//   머리(nose 중심 채운 원)   : 반지름 40
-const THICK_CONNECTIONS: [number, number, number][] = [
-  // 몸통
-  [11, 12, 80], [23, 24, 80], [11, 23, 80], [12, 24, 80],
-  // 윗팔
-  [11, 13, 50], [12, 14, 50],
-  // 아래팔
-  [13, 15, 35], [14, 16, 35],
-  // 허벅지
-  [23, 25, 50], [24, 26, 50],
-  // 종아리
-  [25, 27, 35], [26, 28, 35],
-];
+// 색상 기준 (업계 표준):
+//   머리 (코·눈·귀)          : #FF0000 빨강
+//   몸통 (어깨↔어깨, 골반↔골반, 어깨↔골반) : #FF00FF 마젠타
+//   오른팔 (어깨→팔꿈치→손목) : #00FF00 초록
+//   왼팔  (어깨→팔꿈치→손목) : #0000FF 파랑
+//   오른다리 (골반→무릎→발목) : #FFFF00 노랑
+//   왼다리  (골반→무릎→발목) : #00FFFF 시안
+//
+// lineWidth 10 — 표준 OpenPose 두께 (너무 얇지도 두껍지도 않음)
+
+const OPENPOSE_CONNECTIONS: [number, number, string][] = [
+  // 머리 — 빨강
+  [0, 1], [1, 2], [2, 3], [3, 7],   // 코→왼눈 내→왼눈→왼눈 외→왼귀
+  [0, 4], [4, 5], [5, 6], [6, 8],   // 코→오른눈 내→오른눈→오른눈 외→오른귀
+
+  // 몸통 — 마젠타
+  [11, 12], [23, 24], [11, 23], [12, 24],
+
+  // 오른팔 — 초록  (MediaPipe: 12=오른어깨, 14=오른팔꿈치, 16=오른손목)
+  [12, 14], [14, 16],
+
+  // 왼팔 — 파랑   (MediaPipe: 11=왼어깨, 13=왼팔꿈치, 15=왼손목)
+  [11, 13], [13, 15],
+
+  // 오른다리 — 노랑  (24=오른골반, 26=오른무릎, 28=오른발목)
+  [24, 26], [26, 28],
+
+  // 왼다리 — 시안   (23=왼골반, 25=왼무릎, 27=왼발목)
+  [23, 25], [25, 27],
+].map(([a, b], i) => {
+  // 인덱스 범위로 색상 자동 매핑
+  const color =
+    i < 8  ? "#FF0000" :  // 머리 (0~7)
+    i < 12 ? "#FF00FF" :  // 몸통 (8~11)
+    i < 14 ? "#00FF00" :  // 오른팔 (12~13)
+    i < 16 ? "#0000FF" :  // 왼팔 (14~15)
+    i < 18 ? "#FFFF00" :  // 오른다리 (16~17)
+             "#00FFFF";   // 왼다리 (18~19)
+  return [a, b, color] as [number, number, string];
+});
+
+// 랜드마크별 색상 (관절 점)
+const JOINT_COLOR: Record<number, string> = {
+  0:1,1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1,  // 머리
+  11:2,12:2,23:2,24:2,                    // 몸통
+  13:4,15:4,                              // 왼팔
+  14:3,16:3,                              // 오른팔
+  25:6,27:6,                             // 왼다리
+  26:5,28:5,                             // 오른다리
+} as unknown as Record<number, string>;
+
+const JOINT_COLORS = ["", "#FF0000","#FF00FF","#00FF00","#0000FF","#FFFF00","#00FFFF"];
 
 function drawSkeleton(
   ctx: CanvasRenderingContext2D,
@@ -73,25 +97,27 @@ function drawSkeleton(
   const py  = (i: number) => lm[i][1] * h;
   const vis = (i: number) => lm[i]?.[3] ?? 0;
 
-  ctx.lineCap     = "round";
-  ctx.lineJoin    = "round";
-  ctx.strokeStyle = "#ffffff";
+  ctx.lineCap  = "round";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = 10;
 
-  // ── 신체 부위별 두꺼운 선
-  for (const [a, b, lw] of THICK_CONNECTIONS) {
+  // ── OpenPose 컬러 연결선
+  for (const [a, b, color] of OPENPOSE_CONNECTIONS) {
     if (vis(a) < 0.3 || vis(b) < 0.3) continue;
     ctx.beginPath();
-    ctx.lineWidth = lw;
+    ctx.strokeStyle = color;
     ctx.moveTo(px(a), py(a));
     ctx.lineTo(px(b), py(b));
     ctx.stroke();
   }
 
-  // ── 머리: nose(0) 중심으로 꽉 찬 흰 원
-  if (vis(0) >= 0.3) {
+  // ── 관절 점 (연결선 위에 덧그림)
+  for (const [idxStr, colorIdx] of Object.entries(JOINT_COLOR)) {
+    const i = Number(idxStr);
+    if (vis(i) < 0.3) continue;
     ctx.beginPath();
-    ctx.fillStyle = "#ffffff";
-    ctx.arc(px(0), py(0), 40, 0, Math.PI * 2);
+    ctx.fillStyle = JOINT_COLORS[colorIdx as unknown as number];
+    ctx.arc(px(i), py(i), 5, 0, Math.PI * 2);
     ctx.fill();
   }
 }
