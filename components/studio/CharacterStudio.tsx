@@ -1016,12 +1016,15 @@ export default function CharacterStudio() {
           ) : (
             /* 드롭 존 */
             <div
-              className="flex-1 flex flex-col items-center justify-center gap-2 cursor-pointer select-none"
+              className="flex-1 flex flex-col items-center justify-center gap-3 cursor-pointer select-none border-2 border-dashed border-zinc-600 m-2 rounded-xl hover:border-amber-500 transition-colors"
               onClick={() => document.getElementById("cs-ref-video-input")?.click()}
             >
-              <span className="text-2xl opacity-20">🎬</span>
-              <p className="text-[9px] text-zinc-600 text-center leading-relaxed px-2">
-                원본 영상<br />드롭 또는 클릭
+              <span className="text-3xl">🎬</span>
+              <p className="text-[10px] text-zinc-400 text-center leading-relaxed px-2 font-semibold">
+                원본<br />영상
+              </p>
+              <p className="text-[9px] text-zinc-600 text-center leading-relaxed px-1">
+                클릭 또는<br />드롭
               </p>
             </div>
           )}
