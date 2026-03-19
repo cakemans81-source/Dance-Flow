@@ -79,9 +79,10 @@ type LMData    = number[][];
 type CamPreset = "diagonal" | "front" | "side" | "top";
 
 interface BoneRest {
-  worldDir:  THREE.Vector3;
-  worldQuat: THREE.Quaternion;
-  localQuat: THREE.Quaternion;
+  worldDir:      THREE.Vector3;
+  worldQuat:     THREE.Quaternion;
+  localQuat:     THREE.Quaternion;
+  localBoneAxis: THREE.Vector3; // 본 장축 방향 (LOCAL space) — Swing-Twist 분리용
 }
 
 interface SceneRefs {
@@ -147,7 +148,10 @@ function captureRest(bones: HumanoidBones): Map<BoneKey, BoneRest> {
         dir = cp.clone().sub(wp).normalize(); break;
       }
     }
-    map.set(key, { worldDir: dir, worldQuat: wq.clone(), localQuat: bone.quaternion.clone() });
+    // 본 장축을 LOCAL space로 변환 (세계 방향 → 본 로컬 좌표계)
+    // Swing-Twist 분리 시 twist 축으로 사용 (팔꿈치 Candy-wrapper 방지)
+    const localBoneAxis = dir.clone().applyQuaternion(wq.clone().invert()).normalize();
+    map.set(key, { worldDir: dir, worldQuat: wq.clone(), localQuat: bone.quaternion.clone(), localBoneAxis });
   }
   return map;
 }
@@ -225,7 +229,7 @@ function retargetBone(bone: THREE.Bone, rest: BoneRest, targetDir: THREE.Vector3
 // Kling AI 인물 인식 최적화 기준: 실제 댄서 가동범위 상한선
 const JOINT_LIMITS: Record<string, number> = {
   shoulder: 105, // 어깨: 팔 들기 최대 (수평+약간 위)
-  elbow:     90, // 팔꿈치: 힌지 — 완전 굽힘 이상 절대 불가
+  elbow:    145, // 팔꿈치: 해부학적 최대 굴곡 145° (Twist는 stripTwist로 별도 제거)
   hip:      100, // 고관절
   knee:      95, // 무릎: 힌지 — 과신전 원천 차단
   spine:     30, // 척추: 전체 합계 30° — 폴딩 완전 차단
@@ -256,6 +260,35 @@ function clampFromRest(bone: THREE.Bone, rest: BoneRest, maxDeg: number): void {
     bone.updateMatrix();
     bone.updateWorldMatrix(false, false); // 클램프 후에도 world matrix 즉시 반영
   }
+}
+
+/**
+ * Swing-Twist 분리 — 힌지 관절의 장축 비틀림(Roll/Twist) 수학적 제거
+ *
+ * 팔꿈치는 오직 한 축(굴곡/신전)으로만 움직이는 힌지 관절이다.
+ * retargetBone()의 setFromUnitVectors()는 방향만 맞추고 roll은 임의값이 될 수 있어
+ * LBS Candy-wrapper 아티팩트를 유발한다.
+ *
+ * 해법: Swing-Twist 분리 (Decompose → Zero Twist → Reconstruct)
+ *   1. q의 xyz를 twistAxis(본 장축)에 투영 → Twist 성분 추출
+ *   2. Swing = q × Twist⁻¹  (장축 회전 완전 제거)
+ *   3. 결과 = 순수 방향 변경(Swing)만 남음 → Candy-wrapper 원천 차단
+ *
+ * @param twistAxis 본의 장축 방향 (LOCAL space 단위벡터, rest.localBoneAxis)
+ */
+function stripTwist(bone: THREE.Bone, twistAxis: THREE.Vector3): void {
+  const q = bone.quaternion;
+  // twistAxis 방향으로 q의 xyz 성분 투영 → Twist 쿼터니언 구성
+  const dot = q.x * twistAxis.x + q.y * twistAxis.y + q.z * twistAxis.z;
+  _qa.set(twistAxis.x * dot, twistAxis.y * dot, twistAxis.z * dot, q.w).normalize();
+  // Twist 역수
+  _qc.copy(_qa).invert();
+  // Swing = 원래 회전 × Twist⁻¹ — 장축 롤 완전 제거
+  _qb.copy(q).multiply(_qc);
+  bone.quaternion.copy(_qb).normalize();
+  bone.scale.setScalar(1); // LBS 스트레칭 원천 차단
+  bone.updateMatrix();
+  bone.updateWorldMatrix(false, false);
 }
 
 /**
@@ -293,6 +326,18 @@ function validateHumanPose(lm: LMData): boolean {
   // (5) 상완 길이 합리성 검사 — 팔꿈치 위치 이상 감지
   if (ls.distanceTo(le) < 0.08 || ls.distanceTo(le) > 0.65) return false;
   if (rs.distanceTo(re) < 0.08 || rs.distanceTo(re) > 0.65) return false;
+
+  // (6) 팔꿈치 각도 합리성 검사 — 불가능한 과굴곡(Hyperflexion) 비상정지 스위치
+  // (어깨→팔꿈치) · (팔꿈치→손목) cos값 기준:
+  //   cos ≈ +1 : 팔 완전 펴짐 (정상)
+  //   cos =   0 : 90° 굽힘 (정상)
+  //   cos < -0.95 : 약 162° 이상 굽힘 → MediaPipe 트래킹 오류
+  const lUpperDir = new THREE.Vector3().subVectors(le, ls).normalize();
+  const lForeDir  = new THREE.Vector3().subVectors(lw, le).normalize();
+  const rUpperDir = new THREE.Vector3().subVectors(re, rs).normalize();
+  const rForeDir  = new THREE.Vector3().subVectors(rw, re).normalize();
+  if (lUpperDir.dot(lForeDir) < -0.95) return false; // 왼팔 팔꿈치 과굴곡
+  if (rUpperDir.dot(rForeDir) < -0.95) return false; // 오른팔 팔꿈치 과굴곡
 
   return true;
 }
@@ -341,6 +386,7 @@ function applyPose(
   modelRoot.updateMatrixWorld(true);
 
   // ── STEP 3: 팔·다리 retarget + 클램프 (부모→자식 순서) ─────────────────
+  // Ball-joint: 모든 방향 회전 허용 (어깨, 고관절)
   const apC = (key: BoneKey, dir: THREE.Vector3, limitDeg: number) => {
     const b = bones[key], r = rest.get(key);
     if (!b || !r) return;
@@ -348,11 +394,20 @@ function applyPose(
     clampFromRest(b, r, limitDeg);
   };
 
-  // 팔 (어깨 → 전완 순서)
-  apC("leftArm",      new THREE.Vector3().subVectors(le, ls), JOINT_LIMITS.shoulder);
-  apC("leftForeArm",  new THREE.Vector3().subVectors(lw, le), JOINT_LIMITS.elbow);
-  apC("rightArm",     new THREE.Vector3().subVectors(re, rs), JOINT_LIMITS.shoulder);
-  apC("rightForeArm", new THREE.Vector3().subVectors(rw, re), JOINT_LIMITS.elbow);
+  // Hinge-joint: 굴곡/신전만 허용, 장축 Twist 수학적 제거 (팔꿈치 Candy-wrapper 차단)
+  const apCHinge = (key: BoneKey, dir: THREE.Vector3, limitDeg: number) => {
+    const b = bones[key], r = rest.get(key);
+    if (!b || !r) return;
+    retargetBone(b, r, dir);
+    stripTwist(b, r.localBoneAxis); // ★ Swing-Twist 분리 — 장축 Roll 하드 락
+    clampFromRest(b, r, limitDeg);
+  };
+
+  // 팔: 위팔(Ball-joint) → 전완(Hinge-joint) 순서
+  apC("leftArm",           new THREE.Vector3().subVectors(le, ls), JOINT_LIMITS.shoulder);
+  apCHinge("leftForeArm",  new THREE.Vector3().subVectors(lw, le), JOINT_LIMITS.elbow);
+  apC("rightArm",          new THREE.Vector3().subVectors(re, rs), JOINT_LIMITS.shoulder);
+  apCHinge("rightForeArm", new THREE.Vector3().subVectors(rw, re), JOINT_LIMITS.elbow);
 
   // 다리 (고관절 → 발목 순서)
   apC("leftUpLeg",  new THREE.Vector3().subVectors(lk, lh), JOINT_LIMITS.hip);
