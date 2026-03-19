@@ -355,7 +355,7 @@ export default function CharacterStudio() {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x000000); // 기본: 블랙 (Kling AI 최적)
 
-    const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.001, 1000);
     camera.position.set(...CAM.diagonal.pos);
 
     const controls = new OrbitControls(camera, canvas);
@@ -457,14 +457,25 @@ export default function CharacterStudio() {
         if (isObjectUrl) URL.revokeObjectURL(url);
 
         const model = gltf.scene;
-        const box   = new THREE.Box3().setFromObject(model);
-        const size  = box.getSize(new THREE.Vector3());
-        const min   = box.min;
 
-        // 발 → y=0 정렬, X/Z 중심 정렬
+        // ── STEP 1: 원시 바운딩 박스로 단위 자동 감지 ─────────────────────
+        // Mixamo/FBX는 cm 단위로 export → Three.js(m) 기준으로 100배 거인이 됨
+        // 원시 높이가 100 이상이면 Mixamo cm 단위로 판단 → 0.01 스케일 적용
+        const rawBox  = new THREE.Box3().setFromObject(model);
+        const rawSize = rawBox.getSize(new THREE.Vector3());
+        const autoScale = rawSize.y > 10 ? 0.01 : rawSize.y < 0.5 ? 2.0 : 1.0;
+        model.scale.setScalar(autoScale);
+
+        // ── STEP 2: 스케일 적용 후 바운딩 박스 재계산 ────────────────────
+        model.updateMatrixWorld(true);
+        const box  = new THREE.Box3().setFromObject(model);
+        const size = box.getSize(new THREE.Vector3());
+        const min  = box.min;
+
+        // ── STEP 3: 발바닥 y=0 접지 + X/Z 중심 정렬 ─────────────────────
         model.position.set(
           -(min.x + size.x / 2),
-          -min.y,
+          -min.y,                    // 발바닥을 정확히 y=0에
           -(min.z + size.z / 2)
         );
 
@@ -482,12 +493,20 @@ export default function CharacterStudio() {
         modelRef.current = model;
         setBoneCount(bCount);
 
-        // 모델 높이에 맞게 카메라 거리 보정
-        const scale = size.y > 0 ? size.y / 1.75 : 1;
+        // ── STEP 4: 캐릭터 전신이 뷰포트에 꽉 차도록 카메라 포지셔닝 ──────
+        // 목표: FOV 45° 카메라로 전신(높이 size.y)을 80% 화면에 담기
+        const fovRad   = (45 * Math.PI) / 180;
+        const halfH    = size.y / 2;
+        const camDist  = (halfH / Math.tan(fovRad / 2)) * 1.25; // 1.25 = 여유 마진
+        const torsoY   = size.y * 0.52; // 배꼽~가슴 높이 (OrbitControls 타겟)
         const p = CAM[camPreset];
-        s.camera.position.set(p.pos[0]*scale, p.pos[1]*scale, p.pos[2]*scale);
-        s.controls.target.set(0, size.y * 0.5, 0);
+        // 방향 벡터만 살리고 거리를 camDist로 보정
+        const dirLen = Math.sqrt(p.pos[0]**2 + p.pos[2]**2) || 1;
+        const ratio  = camDist / Math.sqrt(p.pos[0]**2 + p.pos[1]**2 + p.pos[2]**2);
+        s.camera.position.set(p.pos[0]*ratio, torsoY + p.pos[1]*ratio*0.5, p.pos[2]*ratio);
+        s.controls.target.set(0, torsoY, 0);
         s.controls.update();
+        void dirLen; // suppress unused warning
 
         const name = displayName ?? url.split("/").pop() ?? "character.glb";
         setModelName(name);
