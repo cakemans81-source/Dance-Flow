@@ -19,11 +19,13 @@ import ControlPanel from "./ControlPanel";
 import PreviewCanvas from "./PreviewCanvas";
 import VideoConverter from "./VideoConverter";
 import MotionMixer from "./MotionMixer";
+import AutoSequencer from "./AutoSequencer";
+import CharacterStudio from "./CharacterStudio";
 import type { Landmark3D } from "@/hooks/usePose";
 import type { CaptureBackground } from "./PoseCanvas3D";
 
 type Mode = "extract" | "direct" | "toolbox";
-type ToolboxTab = "converter" | "mixer";
+type ToolboxTab = "converter" | "mixer" | "sequencer" | "character3d";
 
 export default function StudioClient() {
   // 두 패널이 공유하는 실시간 포즈 데이터
@@ -81,7 +83,7 @@ export default function StudioClient() {
           <div className="flex flex-col h-full">
             {/* 서브탭 */}
             <div className="flex-shrink-0 flex gap-0.5 p-1.5 bg-zinc-950 border-b border-zinc-800">
-              {(["converter", "mixer"] as ToolboxTab[]).map((tab) => (
+              {(["converter", "mixer", "sequencer", "character3d"] as ToolboxTab[]).map((tab) => (
                 <button
                   key={tab}
                   onClick={() => setToolboxTab(tab)}
@@ -91,12 +93,25 @@ export default function StudioClient() {
                       : "text-zinc-500 hover:text-zinc-300"
                   }`}
                 >
-                  {tab === "converter" ? "WebM→MP4 변환기" : "🎭 모션 믹서"}
+                  {tab === "converter"
+                    ? "WebM→MP4"
+                    : tab === "mixer"
+                      ? "🎭 믹서"
+                      : tab === "sequencer"
+                        ? "🤖 시퀀서"
+                        : "🎭 3D 스튜디오"}
                 </button>
               ))}
             </div>
             <div className="flex-1 overflow-hidden">
-              {toolboxTab === "converter" ? <VideoConverter /> : <MotionMixer />}
+              {toolboxTab === "converter"
+                ? <VideoConverter />
+                : toolboxTab === "mixer"
+                  ? <MotionMixer />
+                  : toolboxTab === "sequencer"
+                    ? <AutoSequencer />
+                    : <CharacterStudio />
+              }
             </div>
           </div>
         ) : (

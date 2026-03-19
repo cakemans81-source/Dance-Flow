@@ -229,3 +229,80 @@ export async function getMotionById(
 
   return data;
 }
+
+// ── 비디오 스토리지 업로드 ────────────────────────────────────────────────
+// 필수 선행 작업:
+//   1. Supabase 대시보드 → Storage → New bucket: "dance-videos" (Public)
+//   2. SQL Editor: ALTER TABLE motions ADD COLUMN IF NOT EXISTS video_url text;
+export async function uploadVideoToStorage(
+  file: File,
+  motionId: string
+): Promise<string | null> {
+  const supabase = getSupabase();
+  const ext = file.name.split(".").pop() ?? "mp4";
+  const path = `${motionId}.${ext}`;
+
+  const { error } = await supabase.storage
+    .from("dance-videos")
+    .upload(path, file, { upsert: true, contentType: file.type });
+
+  if (error) {
+    console.error("[Storage] 업로드 실패:", error.message);
+    return null;
+  }
+
+  const { data: urlData } = supabase.storage
+    .from("dance-videos")
+    .getPublicUrl(path);
+
+  return urlData.publicUrl;
+}
+
+// ── 모션 video_url 컬럼 업데이트 ─────────────────────────────────────────
+export async function updateMotionVideoUrl(
+  id: string,
+  videoUrl: string
+): Promise<void> {
+  const supabase = getSupabase();
+  const { error } = await supabase
+    .from("motions")
+    .update({ video_url: videoUrl })
+    .eq("id", id);
+  if (error) throw new Error(`[Supabase Update] ${error.message} (code: ${error.code})`);
+}
+
+// ── 영상 보유 모션 목록 조회 (AutoSequencer용) ────────────────────────────
+export type MotionVideoRow = {
+  id: string;
+  name: string;
+  video_url: string;
+  created_at: string;
+};
+
+export async function getMotionsWithVideo(
+  genre?: string,
+  tempo?: string
+): Promise<MotionVideoRow[]> {
+  const supabase = getSupabase();
+
+  const { data, error } = await supabase
+    .from("motions")
+    .select("id, name, video_url, created_at")
+    .not("video_url", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(200);
+
+  if (error) throw new Error(`[Supabase Query] ${error.message} (code: ${error.code})`);
+
+  const rows = (data ?? []) as MotionVideoRow[];
+
+  // 이름 파싱 (genre_vibe_tempo_difficulty 형식) 으로 클라이언트 필터링
+  return rows.filter((row) => {
+    const parts = row.name.split("_");
+    const rowGenre = parts[0] ?? "";
+    const rowTempo = parts[2] ?? "";
+    if (genre && rowGenre !== genre) return false;
+    if (tempo && rowTempo !== tempo) return false;
+    return true;
+  });
+}
