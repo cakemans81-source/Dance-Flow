@@ -259,15 +259,30 @@ function validateHumanPose(lm: LMData): boolean {
   if (lm.length < 29) return false;
   const ls = lmv(lm, LM.L_SHOULDER), rs = lmv(lm, LM.R_SHOULDER);
   const lh = lmv(lm, LM.L_HIP),     rh = lmv(lm, LM.R_HIP);
+  const le = lmv(lm, LM.L_ELBOW),   re = lmv(lm, LM.R_ELBOW);
+  const lw = lmv(lm, LM.L_WRIST),   rw = lmv(lm, LM.R_WRIST);
   const sc = new THREE.Vector3().addVectors(ls, rs).multiplyScalar(0.5);
   const hc = new THREE.Vector3().addVectors(lh, rh).multiplyScalar(0.5);
+
   // (1) 어깨가 힙보다 위에 있어야 함
   if (sc.y < hc.y + 0.05) return false;
-  // (2) 척추가 뒤집히지 않아야 함 (y 성분 양수 = 위를 향함)
+  // (2) 척추가 뒤집히지 않아야 함
   const spineDir = new THREE.Vector3().subVectors(sc, hc).normalize();
   if (spineDir.y < 0.2) return false;
-  // (3) 어깨 폭 최소값 — 트래킹 실패 or 정면 완전 가림 감지
+  // (3) 어깨 폭 최소값
   if (ls.distanceTo(rs) < 0.05) return false;
+
+  // (4) 전완 길이 합리성 검사 — 손목 위치 이상 트래킹 감지
+  // MediaPipe poseWorldLandmarks 기준: 성인 전완 0.2~0.5m
+  const lwDist = le.distanceTo(lw);
+  const rwDist = re.distanceTo(rw);
+  if (lwDist < 0.08 || lwDist > 0.65) return false;
+  if (rwDist < 0.08 || rwDist > 0.65) return false;
+
+  // (5) 상완 길이 합리성 검사 — 팔꿈치 위치 이상 감지
+  if (ls.distanceTo(le) < 0.08 || ls.distanceTo(le) > 0.65) return false;
+  if (rs.distanceTo(re) < 0.08 || rs.distanceTo(re) > 0.65) return false;
+
   return true;
 }
 
@@ -335,6 +350,25 @@ function applyPose(
   apC("rightLeg",   new THREE.Vector3().subVectors(ra, rk), JOINT_LIMITS.knee);
 }
 
+/**
+ * 손목 + 손가락 bone 전체를 GLB 초기(T-pose) 상태로 강제 고정
+ *
+ * 호출 시점: applyPose 직후 — 전완 극한 회전 이후에도 손이 항상
+ *            자연스러운 방향을 유지하도록 보장.
+ *
+ * 이유: MediaPipe Pose는 손가락 방향을 추적하지 않는다.
+ *   손 bone을 방치하면 전완 matrixWorld를 상속한 채 LBS 아티팩트로
+ *   "엑소시스트 역굽힘"처럼 보이는 현상이 발생.
+ *   매 프레임 강제 리셋으로 완전 차단.
+ */
+function lockHandsToRest(handRest: Map<THREE.Bone, THREE.Quaternion>): void {
+  for (const [bone, q] of handRest) {
+    bone.quaternion.copy(q);
+    bone.scale.setScalar(1);
+    bone.updateMatrix();
+  }
+}
+
 /** T-pose 리셋 — 쿼터니언 + 스케일 완전 복원 */
 function resetTpose(bones: HumanoidBones, rest: Map<BoneKey, BoneRest>): void {
   for (const [key, r] of rest) {
@@ -369,6 +403,8 @@ export default function CharacterStudio() {
   const bonesRef   = useRef<HumanoidBones>({});
   const restRef    = useRef<Map<BoneKey, BoneRest>>(new Map());
   const prevLmsRef = useRef<LMData | null>(null);   // EMA 스무딩용
+  // 손목 + 손가락 bone 전체의 GLB 초기 quaternion 저장 (엑소시스트 방지)
+  const handRestRef = useRef<Map<THREE.Bone, THREE.Quaternion>>(new Map());
 
   // 재생
   const framesRef   = useRef<CompactFrame[]>([]);
@@ -470,10 +506,13 @@ export default function CharacterStudio() {
           : raw;
         prevLmsRef.current = lms;
 
-        // 인간 포즈 유효성 검사 — 오징어 자세 감지 시 T-pose 강제 복원
+        // 인간 포즈 유효성 검사 — 오징어·손목 이상 감지 시 T-pose 강제 복원
         if (validateHumanPose(lms) && modelRef.current) {
           applyPose(lms, bonesRef.current, restRef.current, modelRef.current);
-        } else if (!validateHumanPose(lms)) {
+          // ★ 손목 + 손가락 전체를 GLB 초기 상태로 강제 고정
+          //   전완 극한 회전 후에도 손이 항상 자연스럽게 유지되도록 보장
+          lockHandsToRest(handRestRef.current);
+        } else {
           resetTpose(bonesRef.current, restRef.current);
         }
       }
@@ -557,6 +596,19 @@ export default function CharacterStudio() {
         restRef.current  = captureRest(bones);
         modelRef.current = model;
         setBoneInfo({ count: bKeys.length, names: bKeys });
+
+        // ── 손목 + 손가락 전체 rest 캡처 ───────────────────────────────────
+        // leftHand / rightHand 자손(손가락 마디 전체)의 초기 quaternion을 저장.
+        // 매 프레임 강제 복원해 "엑소시스트 역굽힘"을 원천 차단.
+        const handRest = new Map<THREE.Bone, THREE.Quaternion>();
+        for (const key of ["leftHand", "rightHand"] as BoneKey[]) {
+          const hb = bones[key];
+          if (!hb) continue;
+          hb.traverse((obj) => {
+            if (obj instanceof THREE.Bone) handRest.set(obj, obj.quaternion.clone());
+          });
+        }
+        handRestRef.current = handRest;
 
         // ── 카메라: FOV 45° 기준 전신 꽉 차게 ──────────────────────────────
         const fovRad   = (45 * Math.PI) / 180;
