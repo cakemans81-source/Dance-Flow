@@ -185,7 +185,7 @@ function interpLms(frames: CompactFrame[], ts: number): LMData {
 function lmv(lm: LMData, i: number): THREE.Vector3 {
   const l = lm[i];
   if (!l) return new THREE.Vector3();
-  return new THREE.Vector3(-l[0], -l[1], l[2]); // x 반전(전면 기준 보정) + y 반전
+  return new THREE.Vector3(-l[0], -l[1], -l[2]); // x·y·z 모두 반전 (Mixamo +z 전면 기준)
 }
 
 /**
