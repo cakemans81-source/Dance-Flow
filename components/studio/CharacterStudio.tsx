@@ -1,26 +1,21 @@
 "use client";
 
 /**
- * CharacterStudio.tsx — Dance Flow 3D 댄스 스튜디오
+ * CharacterStudio.tsx — Dance Flow 3D 댄스 스튜디오 (v3)
  *
  * 파이프라인:
- *  1. /public/character.glb 자동 로드  (커스텀 GLB 드래그&드롭도 지원)
- *  2. DB pose_data(CompactFrame[]) → Bone Quaternion Retargeting
- *  3. 인라인 Web Worker: 60fps 프레임 보간 + 스무딩 (메인 스레드 보호)
- *  4. 시네마틱 3점 조명 + 블랙 배경 (Kling AI 인식 최적)
- *  5. captureStream(60) × 12 Mbps VP9 WebM 녹화 → 다운로드
+ *  1. /public/character.glb 자동 로드  (Mixamo cm 단위 자동 스케일)
+ *  2. DB pose_data(CompactFrame[]) 로드  → motion_data 폴백 지원
+ *  3. 동기 인라인 보간 + EMA 스무딩 (Worker 제거 — 레이턴시 0)
+ *  4. 60fps RAF에서 applyPose → Bone.quaternion 직접 수정
+ *  5. SkinnedMesh.skeleton.bones 폴백 포함 강화 본 감지
+ *  6. [🎬 3D 안무 영상 추출] 명시 클릭 시에만 captureStream 활성화
  *
- * Retargeting 수학:
- *  ① 모델 로드 후 T-pose: 각 본의 worldDir / worldQuat 캡처
- *  ② 매 프레임: lm 좌표 → 방향 벡터 → fromUnitVectors(restDir, targetDir) = delta
- *  ③ newWorldQ  = delta × restWorldQ  (월드 공간 회전 합성)
- *  ④ localQ     = parentWorldQ⁻¹ × newWorldQ  (로컬 공간 변환)
- *  ⑤ bone.quaternion = localQ
- *
- * 최적화:
- *  - 모듈 레벨 temp 오브젝트로 GC 압력 제거 (매 프레임 객체 생성 없음)
- *  - Web Worker 프레임 데이터는 로드 시 1회만 전송
- *  - 토폴로지 체인 상단 본에만 척추 회전 적용 (중복 과회전 방지)
+ * Retargeting:
+ *  restDir = T-pose에서 본→자식 월드 방향 벡터
+ *  delta   = fromUnitVectors(restDir, targetDir)  [월드 공간]
+ *  newQ    = delta × restWorldQ
+ *  localQ  = parentWorldQ⁻¹ × newQ
  */
 
 import { useState, useRef, useEffect, useCallback } from "react";
@@ -30,18 +25,21 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
   getMotionSummaries,
   getPoseDataById,
+  getMotionById,
+  buildPoseData,
   type MotionSummary,
   type CompactFrame,
 } from "@/lib/supabase";
 
-// ── 모듈 레벨 Temp 오브젝트 — 매 프레임 new 없이 재사용 ──────────────────────
+// ── 모듈 레벨 재사용 Temp (매 프레임 new 없음) ────────────────────────────────
 const _va = new THREE.Vector3();
 const _vb = new THREE.Vector3();
 const _qa = new THREE.Quaternion();
 const _qb = new THREE.Quaternion();
 const _qc = new THREE.Quaternion();
 
-// ── MediaPipe 랜드마크 인덱스 ────────────────────────────────────────────────
+// ── MediaPipe Pose world landmark 인덱스 ─────────────────────────────────────
+// poseWorldLandmarks: 힙 중심, 미터 단위 3D (y↓ 양수)
 const LM = {
   L_SHOULDER: 11, R_SHOULDER: 12,
   L_ELBOW:    13, R_ELBOW:    14,
@@ -51,29 +49,28 @@ const LM = {
   L_ANKLE:    27, R_ANKLE:    28,
 } as const;
 
-// ── Mixamo 표준 본 이름 + 범용 폴백 패턴 ────────────────────────────────────
-// mixamorig: prefix 유무 모두 처리, ReadyPlayerMe / VRoid 폴백 포함
+// ── Mixamo / ReadyPlayerMe / VRoid 본 이름 패턴 ──────────────────────────────
 const BONE_PATTERNS: Record<string, RegExp[]> = {
-  hips:          [/(?:mixamorig[_:]?)?Hips$/i,          /pelvis/i],
-  spine:         [/(?:mixamorig[_:]?)?Spine$/i],
-  spine1:        [/(?:mixamorig[_:]?)?Spine1$/i,        /spine[_-]1/i],
-  spine2:        [/(?:mixamorig[_:]?)?Spine2$/i,        /spine[_-]2/i, /upperchest/i, /chest$/i],
-  neck:          [/(?:mixamorig[_:]?)?Neck$/i],
-  head:          [/(?:mixamorig[_:]?)?Head$/i],
-  leftShoulder:  [/(?:mixamorig[_:]?)?LeftShoulder$/i,  /shoulder.*l\b/i],
-  leftArm:       [/(?:mixamorig[_:]?)?LeftArm$/i,       /leftupperarm/i, /^arm[_.]l$/i],
-  leftForeArm:   [/(?:mixamorig[_:]?)?LeftForeArm$/i,   /leftlowerarm/i, /forearm.*l/i],
-  leftHand:      [/(?:mixamorig[_:]?)?LeftHand$/i,      /^hand[_.]l$/i],
-  rightShoulder: [/(?:mixamorig[_:]?)?RightShoulder$/i, /shoulder.*r\b/i],
-  rightArm:      [/(?:mixamorig[_:]?)?RightArm$/i,      /rightupperarm/i, /^arm[_.]r$/i],
-  rightForeArm:  [/(?:mixamorig[_:]?)?RightForeArm$/i,  /rightlowerarm/i, /forearm.*r/i],
-  rightHand:     [/(?:mixamorig[_:]?)?RightHand$/i,     /^hand[_.]r$/i],
-  leftUpLeg:     [/(?:mixamorig[_:]?)?LeftUpLeg$/i,     /leftthigh/i,  /upleg.*l/i],
-  leftLeg:       [/(?:mixamorig[_:]?)?LeftLeg$/i,       /leftcalf/i,   /lowerleg.*l/i],
-  leftFoot:      [/(?:mixamorig[_:]?)?LeftFoot$/i,      /foot.*l\b/i],
-  rightUpLeg:    [/(?:mixamorig[_:]?)?RightUpLeg$/i,    /rightthigh/i, /upleg.*r/i],
-  rightLeg:      [/(?:mixamorig[_:]?)?RightLeg$/i,      /rightcalf/i,  /lowerleg.*r/i],
-  rightFoot:     [/(?:mixamorig[_:]?)?RightFoot$/i,     /foot.*r\b/i],
+  hips:          [/(?:mixamorig[_:.])?Hips$/i,          /pelvis/i, /root/i],
+  spine:         [/(?:mixamorig[_:.])?Spine$/i],
+  spine1:        [/(?:mixamorig[_:.])?Spine1$/i,        /spine[_.]1$/i],
+  spine2:        [/(?:mixamorig[_:.])?Spine2$/i,        /spine[_.]2$/i, /upperchest/i, /chest$/i],
+  neck:          [/(?:mixamorig[_:.])?Neck$/i],
+  head:          [/(?:mixamorig[_:.])?Head$/i],
+  leftShoulder:  [/(?:mixamorig[_:.])?LeftShoulder$/i,  /shoulder[_.]l$/i],
+  leftArm:       [/(?:mixamorig[_:.])?LeftArm$/i,       /leftupperarm/i, /arm[_.]l$/i],
+  leftForeArm:   [/(?:mixamorig[_:.])?LeftForeArm$/i,   /leftlowerarm/i, /forearm[_.]l$/i],
+  leftHand:      [/(?:mixamorig[_:.])?LeftHand$/i,      /hand[_.]l$/i],
+  rightShoulder: [/(?:mixamorig[_:.])?RightShoulder$/i, /shoulder[_.]r$/i],
+  rightArm:      [/(?:mixamorig[_:.])?RightArm$/i,      /rightupperarm/i, /arm[_.]r$/i],
+  rightForeArm:  [/(?:mixamorig[_:.])?RightForeArm$/i,  /rightlowerarm/i, /forearm[_.]r$/i],
+  rightHand:     [/(?:mixamorig[_:.])?RightHand$/i,     /hand[_.]r$/i],
+  leftUpLeg:     [/(?:mixamorig[_:.])?LeftUpLeg$/i,     /leftthigh/i,  /upleg[_.]l$/i],
+  leftLeg:       [/(?:mixamorig[_:.])?LeftLeg$/i,       /leftcalf/i,   /leg[_.]l$/i],
+  leftFoot:      [/(?:mixamorig[_:.])?LeftFoot$/i,      /foot[_.]l$/i],
+  rightUpLeg:    [/(?:mixamorig[_:.])?RightUpLeg$/i,    /rightthigh/i, /upleg[_.]r$/i],
+  rightLeg:      [/(?:mixamorig[_:.])?RightLeg$/i,      /rightcalf/i,  /leg[_.]r$/i],
+  rightFoot:     [/(?:mixamorig[_:.])?RightFoot$/i,     /foot[_.]r$/i],
 };
 
 type BoneKey   = keyof typeof BONE_PATTERNS;
@@ -82,9 +79,9 @@ type LMData    = number[][];
 type CamPreset = "diagonal" | "front" | "side" | "top";
 
 interface BoneRest {
-  worldDir:  THREE.Vector3;     // T-pose에서 본→첫번째 자식 방향 (월드)
-  worldQuat: THREE.Quaternion;  // T-pose 월드 쿼터니언
-  localQuat: THREE.Quaternion;  // T-pose 로컬 쿼터니언 (리셋용)
+  worldDir:  THREE.Vector3;
+  worldQuat: THREE.Quaternion;
+  localQuat: THREE.Quaternion;
 }
 
 interface SceneRefs {
@@ -96,36 +93,6 @@ interface SceneRefs {
   resizeObs: ResizeObserver;
 }
 
-// ── 인라인 Web Worker (Blob URL) ──────────────────────────────────────────────
-// 프레임 보간 + 지수 스무딩을 메인 스레드 밖에서 수행
-const WORKER_SRC = `
-let frames = [];
-let prev = null;
-const SMOOTH = 0.45; // 0 = 스무딩 없음, 1 = 완전 동결
-
-function interp(ts) {
-  if (!frames.length) return [];
-  const t = Math.max(frames[0].t, Math.min(frames[frames.length-1].t, ts));
-  let lo = 0, hi = frames.length - 1;
-  while (lo < hi - 1) { const m=(lo+hi)>>1; if(frames[m].t<=t) lo=m; else hi=m; }
-  const A=frames[lo], B=frames[hi];
-  const a = B.t>A.t ? Math.max(0,Math.min(1,(t-A.t)/(B.t-A.t))) : 0;
-  return A.lm.map((la,i)=>{
-    const lb=B.lm[i]??la;
-    return [la[0]+(lb[0]-la[0])*a, la[1]+(lb[1]-la[1])*a, la[2]+(lb[2]-la[2])*a, la[3]+(lb[3]-la[3])*a];
-  });
-}
-
-self.onmessage = function(e) {
-  if (e.data.type==='init') { frames=e.data.frames; prev=null; return; }
-  let lms = interp(e.data.ts);
-  if (prev && prev.length===lms.length)
-    lms = lms.map((l,i)=>l.map((v,j)=>prev[i][j]+(v-prev[i][j])*(1-SMOOTH)));
-  prev = lms;
-  self.postMessage({ lms });
-};
-`;
-
 // ── 카메라 프리셋 ──────────────────────────────────────────────────────────────
 const CAM: Record<CamPreset, { pos: [number,number,number]; tgt: [number,number,number] }> = {
   diagonal: { pos: [2.5, 1.6, 2.8],  tgt: [0, 0.9, 0] },
@@ -134,40 +101,49 @@ const CAM: Record<CamPreset, { pos: [number,number,number]; tgt: [number,number,
   top:      { pos: [0,   6,   0.1],  tgt: [0, 0,   0] },
 };
 
-// ═════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 // 순수 함수 유틸
-// ═════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 
+/**
+ * 강화된 본 감지:
+ *  1차 — scene graph 순회 (instanceof THREE.Bone)
+ *  2차 폴백 — SkinnedMesh.skeleton.bones (일부 GLB 포맷)
+ */
 function findBones(root: THREE.Object3D): HumanoidBones {
   const result: HumanoidBones = {};
+  const boneSet = new Set<THREE.Bone>();
+
   root.traverse((obj) => {
-    if (!(obj instanceof THREE.Bone)) return;
-    const name = obj.name.replace(/\s+/g, "_");
-    for (const [key, patterns] of Object.entries(BONE_PATTERNS)) {
-      if (!result[key as BoneKey] && patterns.some((p) => p.test(name))) {
-        result[key as BoneKey] = obj;
-      }
+    if (obj instanceof THREE.Bone) boneSet.add(obj);
+    if (obj instanceof THREE.SkinnedMesh) {
+      obj.skeleton.bones.forEach((b) => boneSet.add(b));
     }
   });
+
+  for (const bone of boneSet) {
+    const name = bone.name.replace(/[\s]/g, "_");
+    for (const [key, patterns] of Object.entries(BONE_PATTERNS)) {
+      if (!result[key as BoneKey] && patterns.some((p) => p.test(name))) {
+        result[key as BoneKey] = bone;
+      }
+    }
+  }
   return result;
 }
 
-/** T-pose 상태에서 각 본의 월드 방향/쿼터니언을 스냅샷으로 저장 */
+/** T-pose 월드 방향 & 쿼터니언 캡처 (scene.add + updateMatrixWorld 후 호출) */
 function captureRest(bones: HumanoidBones): Map<BoneKey, BoneRest> {
   const map = new Map<BoneKey, BoneRest>();
   for (const [key, bone] of Object.entries(bones) as [BoneKey, THREE.Bone][]) {
     if (!bone) continue;
-    const wq = new THREE.Quaternion();
-    bone.getWorldQuaternion(wq);
-    const wp = new THREE.Vector3();
-    bone.getWorldPosition(wp);
+    const wq = new THREE.Quaternion(); bone.getWorldQuaternion(wq);
+    const wp = new THREE.Vector3();   bone.getWorldPosition(wp);
     let dir = new THREE.Vector3(0, 1, 0);
     for (const ch of bone.children) {
       if (ch instanceof THREE.Bone) {
-        const cp = new THREE.Vector3();
-        ch.getWorldPosition(cp);
-        dir = cp.clone().sub(wp).normalize();
-        break;
+        const cp = new THREE.Vector3(); ch.getWorldPosition(cp);
+        dir = cp.clone().sub(wp).normalize(); break;
       }
     }
     map.set(key, { worldDir: dir, worldQuat: wq.clone(), localQuat: bone.quaternion.clone() });
@@ -175,50 +151,67 @@ function captureRest(bones: HumanoidBones): Map<BoneKey, BoneRest> {
   return map;
 }
 
-/** MediaPipe lm → THREE.Vector3 (Y축 반전: MP는 Y아래, THREE는 Y위) */
-function lmv(lm: LMData, i: number): THREE.Vector3 {
-  const l = lm[i];
-  if (!l) return new THREE.Vector3();
-  return new THREE.Vector3(l[0], -l[1], -l[2]);
+/**
+ * 동기 이진 탐색 프레임 보간 (Worker 제거 — 0 레이턴시)
+ * O(log N) search + O(33) lerp ≈ 0.05ms/frame
+ */
+function interpLms(frames: CompactFrame[], ts: number): LMData {
+  if (!frames.length) return [];
+  const t = Math.max(frames[0].t, Math.min(frames[frames.length - 1].t, ts));
+  let lo = 0, hi = frames.length - 1;
+  while (lo < hi - 1) { const m = (lo + hi) >> 1; if (frames[m].t <= t) lo = m; else hi = m; }
+  const A = frames[lo], B = frames[hi];
+  const a = B.t > A.t ? Math.max(0, Math.min(1, (t - A.t) / (B.t - A.t))) : 0;
+  return A.lm.map((la, i) => {
+    const lb = B.lm[i] ?? la;
+    return [la[0]+(lb[0]-la[0])*a, la[1]+(lb[1]-la[1])*a,
+            la[2]+(lb[2]-la[2])*a, la[3]+(lb[3]-la[3])*a];
+  });
 }
 
 /**
- * 단일 본 Retargeting (모듈 레벨 temp 오브젝트 재사용)
+ * MP world lm → Three.js 벡터
+ * MP world: x=우(캐릭터 기준), y=아래, z=카메라쪽 양수
+ * THREE:     x=우,              y=위,   z=카메라쪽 양수
+ * → y만 반전
+ */
+function lmv(lm: LMData, i: number): THREE.Vector3 {
+  const l = lm[i];
+  if (!l) return new THREE.Vector3();
+  return new THREE.Vector3(l[0], -l[1], l[2]); // y 반전만 (z는 동일 방향)
+}
+
+/**
+ * 단일 본 Retargeting — 모듈 레벨 temp 재사용으로 GC 0
  *
- * 수학:
- *   delta    = fromUnitVectors(restDir, targetDir)
- *   newWorldQ = delta × restWorldQ
- *   localQ   = parentWorldQ⁻¹ × newWorldQ
+ *  delta    = fromUnitVectors(restDir, targetDir)
+ *  newWorldQ = delta × restWorldQ
+ *  localQ   = parentWorldQ⁻¹ × newWorldQ
  */
 function retargetBone(bone: THREE.Bone, rest: BoneRest, targetDir: THREE.Vector3): void {
   _va.copy(targetDir).normalize();
   if (_va.lengthSq() < 1e-6) { bone.quaternion.copy(rest.localQuat); return; }
-
   _vb.copy(rest.worldDir).normalize();
-  // delta = fromUnitVectors(restDir, targetDir)
-  _qa.setFromUnitVectors(_vb, _va);
-  // newWorldQ = delta × restWorldQ
-  _qb.copy(rest.worldQuat);
-  _qa.multiply(_qb); // _qa = delta × restWorldQ
+  if (_vb.lengthSq() < 1e-6) { bone.quaternion.copy(rest.localQuat); return; }
 
-  // localQ = parentWorldQ⁻¹ × newWorldQ
+  _qa.setFromUnitVectors(_vb, _va);        // delta
+  _qb.copy(rest.worldQuat);
+  _qa.multiply(_qb);                        // _qa = delta × restWorldQ
+
   _qc.identity();
   if (bone.parent) {
     bone.parent.getWorldQuaternion(_qc);
     _qc.invert();
   }
-  _qc.multiply(_qa); // _qc = invParent × newWorldQ
-
+  _qc.multiply(_qa);                        // localQ = invParent × newWorldQ
   bone.quaternion.copy(_qc);
   bone.updateMatrix();
 }
 
-/**
- * 전체 포즈 적용
- * - 척추: 체인 최상단 본 하나에만 적용 (중복 과회전 방지)
- * - 팔·다리: 부모→자식 순서 보장 (leftArm 먼저, leftForeArm 다음)
- */
+/** 전체 포즈 적용 — 부모→자식 순서 보장 */
 function applyPose(lm: LMData, bones: HumanoidBones, rest: Map<BoneKey, BoneRest>): void {
+  if (!lm.length) return;
+
   const ls = lmv(lm, LM.L_SHOULDER), rs = lmv(lm, LM.R_SHOULDER);
   const le = lmv(lm, LM.L_ELBOW),   re = lmv(lm, LM.R_ELBOW);
   const lw = lmv(lm, LM.L_WRIST),   rw = lmv(lm, LM.R_WRIST);
@@ -226,73 +219,61 @@ function applyPose(lm: LMData, bones: HumanoidBones, rest: Map<BoneKey, BoneRest
   const lk = lmv(lm, LM.L_KNEE),    rk = lmv(lm, LM.R_KNEE);
   const la = lmv(lm, LM.L_ANKLE),   ra = lmv(lm, LM.R_ANKLE);
 
-  // 척추 방향: 힙 중점 → 어깨 중점
   const hipC      = new THREE.Vector3().addVectors(lh, rh).multiplyScalar(0.5);
   const shoulderC = new THREE.Vector3().addVectors(ls, rs).multiplyScalar(0.5);
   const spineDir  = new THREE.Vector3().subVectors(shoulderC, hipC);
 
-  // 척추 체인 최상단 본만 회전 (spine2 > spine1 > spine 우선순위)
-  const topSpineKey = (["spine2", "spine1", "spine"] as BoneKey[]).find((k) => bones[k]);
-  if (topSpineKey) {
-    const r = rest.get(topSpineKey);
-    if (r) retargetBone(bones[topSpineKey]!, r, spineDir);
-  }
+  // 척추: 최상단 본 하나에만 (중복 과회전 방지)
+  const topSpine = (["spine2", "spine1", "spine"] as BoneKey[]).find((k) => bones[k]);
+  if (topSpine) { const r = rest.get(topSpine); if (r) retargetBone(bones[topSpine]!, r, spineDir); }
 
   // 팔·다리 (부모→자식 순서)
-  const apply = (key: BoneKey, dir: THREE.Vector3) => {
-    const b = bones[key], r = rest.get(key);
-    if (b && r) retargetBone(b, r, dir);
+  const ap = (key: BoneKey, dir: THREE.Vector3) => {
+    const b = bones[key], r = rest.get(key); if (b && r) retargetBone(b, r, dir);
   };
-  apply("leftArm",      new THREE.Vector3().subVectors(le, ls));
-  apply("leftForeArm",  new THREE.Vector3().subVectors(lw, le));
-  apply("rightArm",     new THREE.Vector3().subVectors(re, rs));
-  apply("rightForeArm", new THREE.Vector3().subVectors(rw, re));
-  apply("leftUpLeg",    new THREE.Vector3().subVectors(lk, lh));
-  apply("leftLeg",      new THREE.Vector3().subVectors(la, lk));
-  apply("rightUpLeg",   new THREE.Vector3().subVectors(rk, rh));
-  apply("rightLeg",     new THREE.Vector3().subVectors(ra, rk));
+  ap("leftArm",      new THREE.Vector3().subVectors(le, ls));
+  ap("leftForeArm",  new THREE.Vector3().subVectors(lw, le));
+  ap("rightArm",     new THREE.Vector3().subVectors(re, rs));
+  ap("rightForeArm", new THREE.Vector3().subVectors(rw, re));
+  ap("leftUpLeg",    new THREE.Vector3().subVectors(lk, lh));
+  ap("leftLeg",      new THREE.Vector3().subVectors(la, lk));
+  ap("rightUpLeg",   new THREE.Vector3().subVectors(rk, rh));
+  ap("rightLeg",     new THREE.Vector3().subVectors(ra, rk));
 }
 
-/** 시네마틱 3점 조명 세팅 */
+/** T-pose 리셋 */
+function resetTpose(bones: HumanoidBones, rest: Map<BoneKey, BoneRest>): void {
+  for (const [key, r] of rest) {
+    const b = bones[key as BoneKey]; if (b) { b.quaternion.copy(r.localQuat); b.updateMatrix(); }
+  }
+}
+
+/** 시네마틱 3점 조명 */
 function setupLighting(scene: THREE.Scene): void {
   scene.children.filter((c) => c.userData.__light).forEach((c) => scene.remove(c));
-
-  // 키라이트: 따뜻한 주광 (우상단)
   const key = new THREE.DirectionalLight(0xfff4e0, 3.2);
-  key.position.set(3, 5, 4);
-  key.castShadow = true;
-  key.shadow.mapSize.set(1024, 1024);
-  key.shadow.camera.near = 0.1;
-  key.shadow.camera.far  = 20;
+  key.position.set(3, 5, 4); key.castShadow = true;
+  key.shadow.mapSize.set(1024, 1024); key.shadow.camera.near = 0.1; key.shadow.camera.far = 20;
   key.userData.__light = true;
-
-  // 필라이트: 차가운 보조광 (좌하단)
   const fill = new THREE.DirectionalLight(0xc8d8ff, 1.0);
-  fill.position.set(-4, 2, -2);
-  fill.userData.__light = true;
-
-  // 림라이트: 실루엣 분리 (후면)
+  fill.position.set(-4, 2, -2); fill.userData.__light = true;
   const rim = new THREE.DirectionalLight(0xffffff, 1.8);
-  rim.position.set(0, 3.5, -6);
-  rim.userData.__light = true;
-
-  // 환경광: 약한 헤미스피어
+  rim.position.set(0, 3.5, -6); rim.userData.__light = true;
   const amb = new THREE.HemisphereLight(0x334466, 0x110a00, 0.5);
   amb.userData.__light = true;
-
   scene.add(key, fill, rim, amb);
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 // 컴포넌트
-// ═════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 export default function CharacterStudio() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const sceneRef  = useRef<SceneRefs | null>(null);
-  const modelRef  = useRef<THREE.Object3D | null>(null);
-  const bonesRef  = useRef<HumanoidBones>({});
-  const restRef   = useRef<Map<BoneKey, BoneRest>>(new Map());
-  const workerRef = useRef<Worker | null>(null);
+  const canvasRef  = useRef<HTMLCanvasElement>(null);
+  const sceneRef   = useRef<SceneRefs | null>(null);
+  const modelRef   = useRef<THREE.Object3D | null>(null);
+  const bonesRef   = useRef<HumanoidBones>({});
+  const restRef    = useRef<Map<BoneKey, BoneRest>>(new Map());
+  const prevLmsRef = useRef<LMData | null>(null);   // EMA 스무딩용
 
   // 재생
   const framesRef   = useRef<CompactFrame[]>([]);
@@ -306,40 +287,27 @@ export default function CharacterStudio() {
 
   // ── UI 상태 ──────────────────────────────────────────────────────────────
   const [modelName,   setModelName]   = useState<string | null>(null);
-  const [boneCount,   setBoneCount]   = useState(0);
+  const [boneInfo,    setBoneInfo]    = useState<{ count: number; names: string[] }>({ count: 0, names: [] });
   const [motions,     setMotions]     = useState<MotionSummary[]>([]);
   const [selectedId,  setSelectedId]  = useState("");
   const [poseLoaded,  setPoseLoaded]  = useState(false);
+  const [poseInfo,    setPoseInfo]    = useState<string>("");
   const [isPlaying,   setIsPlaying]   = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordUrl,   setRecordUrl]   = useState<string | null>(null);
   const [camPreset,   setCamPreset]   = useState<CamPreset>("diagonal");
-  const [status,      setStatus]      = useState("기본 캐릭터를 로드 중…");
+  const [status,      setStatus]      = useState("기본 캐릭터 로드 중…");
   const [dbLoading,   setDbLoading]   = useState(true);
 
   // ── DB 모션 목록 ──────────────────────────────────────────────────────────
   useEffect(() => {
     getMotionSummaries(50)
       .then((list) => { setMotions(list); if (list[0]) setSelectedId(list[0].id); })
-      .catch(() => {})
+      .catch(() => setStatus("DB 연결 실패"))
       .finally(() => setDbLoading(false));
   }, []);
 
-  // ── 인라인 Worker ─────────────────────────────────────────────────────────
-  useEffect(() => {
-    const blob = new Blob([WORKER_SRC], { type: "application/javascript" });
-    const url  = URL.createObjectURL(blob);
-    const w    = new Worker(url);
-    w.onmessage = (e) => {
-      if (!playingRef.current) return;
-      applyPose(e.data.lms as LMData, bonesRef.current, restRef.current);
-    };
-    workerRef.current = w;
-    URL.revokeObjectURL(url);
-    return () => w.terminate();
-  }, []);
-
-  // ── Three.js 씬 초기화 ────────────────────────────────────────────────────
+  // ── Three.js 씬 초기화 (마운트 1회) ───────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -350,58 +318,63 @@ export default function CharacterStudio() {
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.15;
-    renderer.setClearColor(0x000000, 1);
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x000000); // 기본: 블랙 (Kling AI 최적)
+    scene.background = new THREE.Color(0x000000);
 
     const camera = new THREE.PerspectiveCamera(45, 1, 0.001, 1000);
     camera.position.set(...CAM.diagonal.pos);
 
     const controls = new OrbitControls(camera, canvas);
-    controls.enableDamping  = true;
-    controls.dampingFactor  = 0.05;
-    controls.minDistance    = 0.5;
-    controls.maxDistance    = 25;
-    controls.target.set(...CAM.diagonal.tgt);
-    controls.update();
+    controls.enableDamping = true; controls.dampingFactor = 0.05;
+    controls.minDistance = 0.2; controls.maxDistance = 100;
+    controls.target.set(...CAM.diagonal.tgt); controls.update();
 
     setupLighting(scene);
 
-    // 바닥 (블랙 배경에서는 숨겨도 되지만 참조용으로 유지)
+    // 바닥
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(12, 12),
       new THREE.MeshStandardMaterial({ color: 0x080808, roughness: 1 })
     );
-    floor.rotation.x = -Math.PI / 2;
-    floor.receiveShadow = true;
-    floor.name = "floor";
+    floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; floor.name = "floor";
     scene.add(floor);
 
     // ResizeObserver
     const resizeObs = new ResizeObserver(() => {
       const w = canvas.clientWidth, h = canvas.clientHeight;
       if (!w || !h) return;
-      renderer.setSize(w, h, false);
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
+      renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
     });
     resizeObs.observe(canvas);
     renderer.setSize(canvas.clientWidth || 800, canvas.clientHeight || 600, false);
     camera.aspect = (canvas.clientWidth || 800) / (canvas.clientHeight || 600);
     camera.updateProjectionMatrix();
 
-    // RAF 루프
+    // RAF 루프 — 동기 보간 (Worker 불필요)
+    const SMOOTH = 0.35; // EMA 계수: 0=무스무딩, 1=동결
     let rafId = 0;
     const animate = () => {
       rafId = requestAnimationFrame(animate);
       controls.update();
+
       if (playingRef.current && framesRef.current.length > 0) {
-        const elapsed = (performance.now() - startRef.current) / 1000;
-        const t0 = framesRef.current[0].t;
-        const loopT = durationRef.current > 0 ? elapsed % durationRef.current : 0;
-        workerRef.current?.postMessage({ type: "query", ts: t0 + loopT });
+        const elapsed  = (performance.now() - startRef.current) / 1000;
+        const dur      = durationRef.current;
+        const t0       = framesRef.current[0].t;
+        const loopT    = dur > 0 ? elapsed % dur : 0;
+        const raw      = interpLms(framesRef.current, t0 + loopT);
+
+        // EMA 스무딩
+        const prev = prevLmsRef.current;
+        const lms = (prev && prev.length === raw.length)
+          ? raw.map((l, i) => l.map((v, j) => prev[i][j] + (v - prev[i][j]) * (1 - SMOOTH)))
+          : raw;
+        prevLmsRef.current = lms;
+
+        applyPose(lms, bonesRef.current, restRef.current);
       }
+
       renderer.render(scene, camera);
     };
     animate();
@@ -422,25 +395,21 @@ export default function CharacterStudio() {
 
   // ── 카메라 프리셋 동기화 ──────────────────────────────────────────────────
   useEffect(() => {
-    const s = sceneRef.current;
-    if (!s) return;
+    const s = sceneRef.current; if (!s) return;
     s.camera.position.set(...CAM[camPreset].pos);
     s.controls.target.set(...CAM[camPreset].tgt);
     s.controls.update();
   }, [camPreset]);
 
-  // ── GLB 로드 (URL 버전: /public 경로 또는 Object URL) ─────────────────────
+  // ── GLB 로드 ─────────────────────────────────────────────────────────────
   const loadGlbUrl = useCallback((url: string, displayName?: string) => {
-    const s = sceneRef.current;
-    if (!s) return;
-
+    const s = sceneRef.current; if (!s) return;
     setStatus("3D 모델 로드 중…");
-    playingRef.current = false;
-    setIsPlaying(false);
+    playingRef.current = false; setIsPlaying(false); prevLmsRef.current = null;
 
+    // 이전 모델 메모리 해제
     if (modelRef.current) {
       s.scene.remove(modelRef.current);
-      // 모델 메모리 해제
       modelRef.current.traverse((obj) => {
         if (obj instanceof THREE.Mesh) {
           obj.geometry.dispose();
@@ -453,157 +422,157 @@ export default function CharacterStudio() {
     new GLTFLoader().load(
       url,
       (gltf) => {
-        const isObjectUrl = url.startsWith("blob:");
-        if (isObjectUrl) URL.revokeObjectURL(url);
-
+        if (url.startsWith("blob:")) URL.revokeObjectURL(url);
         const model = gltf.scene;
 
-        // ── STEP 1: 원시 바운딩 박스로 단위 자동 감지 ─────────────────────
-        // Mixamo/FBX는 cm 단위로 export → Three.js(m) 기준으로 100배 거인이 됨
-        // 원시 높이가 100 이상이면 Mixamo cm 단위로 판단 → 0.01 스케일 적용
+        // ── 단위 자동 감지 (Mixamo = cm → 0.01 스케일) ─────────────────────
         const rawBox  = new THREE.Box3().setFromObject(model);
-        const rawSize = rawBox.getSize(new THREE.Vector3());
-        const autoScale = rawSize.y > 10 ? 0.01 : rawSize.y < 0.5 ? 2.0 : 1.0;
+        const rawH    = rawBox.max.y - rawBox.min.y;
+        const autoScale = rawH > 10 ? 0.01 : rawH < 0.5 ? 2.0 : 1.0;
         model.scale.setScalar(autoScale);
 
-        // ── STEP 2: 스케일 적용 후 바운딩 박스 재계산 ────────────────────
+        // ── 스케일 후 바운딩 박스 재계산 ────────────────────────────────────
         model.updateMatrixWorld(true);
         const box  = new THREE.Box3().setFromObject(model);
         const size = box.getSize(new THREE.Vector3());
         const min  = box.min;
 
-        // ── STEP 3: 발바닥 y=0 접지 + X/Z 중심 정렬 ─────────────────────
-        model.position.set(
-          -(min.x + size.x / 2),
-          -min.y,                    // 발바닥을 정확히 y=0에
-          -(min.z + size.z / 2)
-        );
+        // ── 발바닥 y=0 접지 + X/Z 센터링 ───────────────────────────────────
+        model.position.set(-(min.x + size.x / 2), -min.y, -(min.z + size.z / 2));
 
         model.traverse((obj) => {
           if (obj instanceof THREE.Mesh) { obj.castShadow = true; obj.receiveShadow = true; }
         });
 
         s.scene.add(model);
-        model.updateMatrixWorld(true); // T-pose 캡처 전 월드 행렬 강제 갱신
+        model.updateMatrixWorld(true); // ← T-pose 캡처 전 필수
 
+        // ── 본 감지 ─────────────────────────────────────────────────────────
         const bones  = findBones(model);
-        const bCount = Object.values(bones).filter(Boolean).length;
+        const bKeys  = Object.entries(bones).filter(([, v]) => v).map(([k]) => k);
         bonesRef.current = bones;
         restRef.current  = captureRest(bones);
         modelRef.current = model;
-        setBoneCount(bCount);
+        setBoneInfo({ count: bKeys.length, names: bKeys });
 
-        // ── STEP 4: 캐릭터 전신이 뷰포트에 꽉 차도록 카메라 포지셔닝 ──────
-        // 목표: FOV 45° 카메라로 전신(높이 size.y)을 80% 화면에 담기
+        // ── 카메라: FOV 45° 기준 전신 꽉 차게 ──────────────────────────────
         const fovRad   = (45 * Math.PI) / 180;
-        const halfH    = size.y / 2;
-        const camDist  = (halfH / Math.tan(fovRad / 2)) * 1.25; // 1.25 = 여유 마진
-        const torsoY   = size.y * 0.52; // 배꼽~가슴 높이 (OrbitControls 타겟)
+        const camDist  = ((size.y / 2) / Math.tan(fovRad / 2)) * 1.3;
+        const torsoY   = size.y * 0.52;
         const p = CAM[camPreset];
-        // 방향 벡터만 살리고 거리를 camDist로 보정
-        const dirLen = Math.sqrt(p.pos[0]**2 + p.pos[2]**2) || 1;
-        const ratio  = camDist / Math.sqrt(p.pos[0]**2 + p.pos[1]**2 + p.pos[2]**2);
-        s.camera.position.set(p.pos[0]*ratio, torsoY + p.pos[1]*ratio*0.5, p.pos[2]*ratio);
+        const baseLen  = Math.sqrt(p.pos[0]**2 + p.pos[1]**2 + p.pos[2]**2) || 1;
+        const ratio    = camDist / baseLen;
+        s.camera.position.set(p.pos[0]*ratio, torsoY + p.pos[1]*ratio*0.3, p.pos[2]*ratio);
         s.controls.target.set(0, torsoY, 0);
+        s.controls.minDistance = camDist * 0.1;
+        s.controls.maxDistance = camDist * 8;
         s.controls.update();
-        void dirLen; // suppress unused warning
 
-        const name = displayName ?? url.split("/").pop() ?? "character.glb";
+        const name = displayName ?? url.split("/").pop() ?? "model.glb";
         setModelName(name);
         setStatus(
-          bCount > 0
-            ? `✅ ${name} 로드 완료 · ${bCount}개 본 매핑됨`
-            : `⚠️ ${name} 로드됨 — 본을 찾지 못함 (Armature 포함 여부 확인)`
+          bKeys.length > 0
+            ? `✅ ${name} — ${bKeys.length}개 본 감지됨 (scale ×${autoScale})`
+            : `⚠️ ${name} 로드됨 — 본 없음 (Armature 미포함 가능성)`
         );
       },
       undefined,
-      (err) => {
-        setStatus(`모델 로드 실패: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      (err) => setStatus(`로드 실패: ${err instanceof Error ? err.message : String(err)}`)
     );
   }, [camPreset]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── 드래그&드롭 / 파일 선택 (커스텀 GLB 오버라이드) ──────────────────────
-  const handleFileDrop = useCallback(
-    (e: React.DragEvent<HTMLDivElement>) => {
-      e.preventDefault();
-      const file = e.dataTransfer.files[0];
-      if (!file) return;
-      const ext = file.name.split(".").pop()?.toLowerCase();
-      if (ext !== "glb" && ext !== "gltf") { setStatus("GLB / GLTF 파일만 지원됩니다."); return; }
-      loadGlbUrl(URL.createObjectURL(file), file.name);
-    },
-    [loadGlbUrl]
-  );
-  const handleFileInput = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (file) loadGlbUrl(URL.createObjectURL(file), file.name);
-    },
-    [loadGlbUrl]
-  );
+  const handleFileDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0]; if (!file) return;
+    const ext = file.name.split(".").pop()?.toLowerCase();
+    if (ext !== "glb" && ext !== "gltf") { setStatus("GLB / GLTF 파일만 지원됩니다."); return; }
+    loadGlbUrl(URL.createObjectURL(file), file.name);
+  }, [loadGlbUrl]);
 
-  // ── 포즈 데이터 로드 ──────────────────────────────────────────────────────
+  const handleFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]; if (file) loadGlbUrl(URL.createObjectURL(file), file.name);
+  }, [loadGlbUrl]);
+
+  // ── 포즈 데이터 로드 (pose_data → motion_data 폴백) ──────────────────────
   const handleLoadPose = useCallback(async () => {
     if (!selectedId) return;
-    setStatus("포즈 데이터 로드 중…");
+    setStatus("포즈 데이터 로드 중…"); setPoseLoaded(false); prevLmsRef.current = null;
     try {
+      let frames: CompactFrame[] = [];
+      let duration = 0;
+      let source = "";
+
+      // 1차: pose_data 컬럼 시도
       const pd = await getPoseDataById(selectedId);
-      if (!pd?.frames.length) { setStatus("❌ pose_data 없음 — Extract 모드에서 저장 필요"); return; }
-      framesRef.current   = pd.frames;
-      durationRef.current = pd.meta.duration;
-      workerRef.current?.postMessage({ type: "init", frames: pd.frames });
+      if (pd?.frames.length) {
+        frames = pd.frames; duration = pd.meta.duration;
+        source = `pose_data — ${pd.meta.frameCount}프레임`;
+      } else {
+        // 2차 폴백: motion_data → CompactFrame 변환
+        const row = await getMotionById(selectedId);
+        if (row.motion_data?.length) {
+          const conv = buildPoseData(row.motion_data);
+          frames = conv.frames; duration = conv.meta.duration;
+          source = `motion_data(폴백) — ${conv.meta.frameCount}프레임`;
+        }
+      }
+
+      if (!frames.length) {
+        setStatus("❌ 포즈 데이터 없음 — Extract 모드에서 녹화 후 저장하세요."); return;
+      }
+
+      framesRef.current   = frames;
+      durationRef.current = duration;
       setPoseLoaded(true);
-      setStatus(`✅ ${pd.meta.frameCount}프레임 / ${pd.meta.duration.toFixed(1)}s 로드 완료`);
+      setPoseInfo(`${source} / ${duration.toFixed(1)}s`);
+      setStatus(`✅ 포즈 로드 완료 — ▶ 재생을 눌러 춤을 시작하세요.`);
     } catch (e) {
       setStatus(`포즈 로드 실패: ${e instanceof Error ? e.message : String(e)}`);
     }
   }, [selectedId]);
 
-  // ── 재생 / 정지 ──────────────────────────────────────────────────────────
+  // ── 재생 ─────────────────────────────────────────────────────────────────
   const handlePlay = useCallback(() => {
-    if (!modelRef.current) { setStatus("모델 로드 중입니다."); return; }
-    if (!framesRef.current.length) { setStatus("먼저 안무 데이터를 로드하세요."); return; }
+    if (!modelRef.current) { setStatus("모델 로드 대기 중입니다."); return; }
+    if (!framesRef.current.length) { setStatus("먼저 포즈 데이터를 로드하세요."); return; }
+    prevLmsRef.current = null;
     startRef.current   = performance.now();
     playingRef.current = true;
     setIsPlaying(true);
-    setStatus("▶ 재생 중…");
+    setStatus("▶ 재생 중… (루프)");
   }, []);
 
+  // ── 정지 → T-pose 리셋 ────────────────────────────────────────────────────
   const handleStop = useCallback(() => {
     playingRef.current = false;
     setIsPlaying(false);
-    setStatus("■ 정지");
-    for (const [key, rest] of restRef.current) {
-      const b = bonesRef.current[key as BoneKey];
-      if (b) { b.quaternion.copy(rest.localQuat); b.updateMatrix(); }
-    }
+    prevLmsRef.current = null;
+    resetTpose(bonesRef.current, restRef.current);
+    setStatus("■ 정지 — T-pose 복원");
   }, []);
 
-  // ── 3D 안무 영상 추출 ─────────────────────────────────────────────────────
+  // ── 녹화 (명시 클릭 시에만 captureStream 활성화) ─────────────────────────
   const handleStartRecord = useCallback(() => {
-    const s = sceneRef.current;
-    if (!s) return;
+    const s = sceneRef.current; if (!s) return;
     if (!modelRef.current || !framesRef.current.length) {
-      setStatus("모델과 안무 데이터가 모두 필요합니다."); return;
+      setStatus("모델과 포즈 데이터가 모두 필요합니다."); return;
     }
     if (recordUrl) { URL.revokeObjectURL(recordUrl); setRecordUrl(null); }
 
-    // 재생 시작 (아직 재생 중이 아닌 경우)
+    // 재생 시작 (정지 상태라면)
     if (!playingRef.current) {
+      prevLmsRef.current = null;
       startRef.current   = performance.now();
       playingRef.current = true;
       setIsPlaying(true);
     }
 
+    // ← 사용자가 명시적으로 클릭한 이후에만 captureStream 실행
     const stream   = s.renderer.domElement.captureStream(60);
     const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
-      ? "video/webm;codecs=vp9"
-      : "video/webm";
-
+      ? "video/webm;codecs=vp9" : "video/webm";
     const rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 12_000_000 });
-    recorderRef.current = rec;
-    chunksRef.current   = [];
+    recorderRef.current = rec; chunksRef.current = [];
 
     rec.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
     rec.onstop = () => {
@@ -612,7 +581,6 @@ export default function CharacterStudio() {
       setIsRecording(false);
       setStatus("✅ 영상 추출 완료 — 다운로드 후 Kling AI에 업로드하세요.");
     };
-
     rec.start(100);
     setIsRecording(true);
     setStatus("🔴 녹화 중… 12 Mbps · VP9 · 60fps");
@@ -628,10 +596,7 @@ export default function CharacterStudio() {
     a.href = recordUrl; a.download = `dance_flow_3d_${Date.now()}.webm`; a.click();
   }, [recordUrl]);
 
-  // ── 언마운트 클린업 ───────────────────────────────────────────────────────
-  useEffect(() => () => {
-    if (recordUrl) URL.revokeObjectURL(recordUrl);
-  }, [recordUrl]);
+  useEffect(() => () => { if (recordUrl) URL.revokeObjectURL(recordUrl); }, [recordUrl]);
 
   // ── JSX ───────────────────────────────────────────────────────────────────
   return (
@@ -645,42 +610,47 @@ export default function CharacterStudio() {
           <p className="text-[11px] text-zinc-500 mt-0.5">Retargeting → Kling AI 레퍼런스 영상</p>
         </div>
 
-        {/* 상태 표시 */}
+        {/* 상태 */}
         <div className="text-[11px] leading-relaxed bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-400 min-h-[2.8rem]">
           {status}
-          {boneCount > 0 && (
-            <span className="ml-1.5 px-1.5 py-0.5 rounded bg-emerald-900/60 text-emerald-400 text-[10px] font-semibold">
-              {boneCount} bones
-            </span>
-          )}
         </div>
 
+        {/* 본 정보 */}
+        {boneInfo.count > 0 && (
+          <div className="bg-emerald-950/30 border border-emerald-900/50 rounded-lg px-3 py-2">
+            <p className="text-[10px] font-semibold text-emerald-400 mb-1">
+              감지된 본 {boneInfo.count}개
+            </p>
+            <div className="flex flex-wrap gap-1">
+              {boneInfo.names.map((n) => (
+                <span key={n} className="text-[9px] bg-emerald-900/40 text-emerald-300 px-1.5 py-0.5 rounded">
+                  {n}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* ── 1. 3D 모델 ── */}
-        <Sec label="3D 모델 (커스텀 교체)">
+        <Sec label="3D 모델">
           <div
-            onDrop={handleFileDrop}
-            onDragOver={(e) => e.preventDefault()}
+            onDrop={handleFileDrop} onDragOver={(e) => e.preventDefault()}
             onClick={() => document.getElementById("cs-file-input")?.click()}
             className="border-2 border-dashed border-zinc-700 hover:border-violet-500 rounded-xl p-3 text-center cursor-pointer transition-colors"
           >
-            <p className="text-[11px] text-zinc-500">
-              드래그&드롭 또는 클릭<br />
-              <span className="text-[10px] text-zinc-600">Mixamo · ReadyPlayerMe · VRoid GLB</span>
-            </p>
-            {modelName && modelName !== "character.glb" && (
-              <p className="text-[10px] text-emerald-400 mt-1 truncate">↑ {modelName}</p>
-            )}
+            {modelName
+              ? <p className="text-[11px] text-emerald-400 truncate">✅ {modelName}</p>
+              : <p className="text-[11px] text-zinc-500">드래그&드롭 또는 클릭<br /><span className="text-[10px] text-zinc-600">Mixamo · ReadyPlayerMe GLB</span></p>
+            }
           </div>
           <input id="cs-file-input" type="file" accept=".glb,.gltf" className="hidden" onChange={handleFileInput} />
-          <button
-            onClick={() => loadGlbUrl("/character.glb", "character.glb")}
-            className="w-full py-1.5 rounded-lg text-[11px] font-semibold bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors"
-          >
+          <button onClick={() => loadGlbUrl("/character.glb", "character.glb")}
+            className="w-full py-1.5 rounded-lg text-[11px] font-semibold bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors">
             🔄 기본 캐릭터 재로드
           </button>
         </Sec>
 
-        {/* ── 2. 안무 데이터 ── */}
+        {/* ── 2. 안무 선택 ── */}
         <Sec label="안무 데이터 (DB)">
           {dbLoading
             ? <p className="text-[11px] text-zinc-500 animate-pulse">로드 중…</p>
@@ -688,32 +658,31 @@ export default function CharacterStudio() {
               ? <p className="text-[11px] text-amber-400">저장된 모션 없음</p>
               : (
                 <>
-                  <select
-                    value={selectedId}
-                    onChange={(e) => { setSelectedId(e.target.value); setPoseLoaded(false); }}
+                  <select value={selectedId}
+                    onChange={(e) => { setSelectedId(e.target.value); setPoseLoaded(false); setPoseInfo(""); }}
                     className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 outline-none focus:border-violet-500"
                   >
                     {motions.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                   </select>
-                  <button
-                    onClick={handleLoadPose}
-                    disabled={!selectedId}
-                    className="w-full py-1.5 rounded-lg text-xs font-semibold bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40 text-white transition-colors"
-                  >
-                    📥 포즈 데이터 로드{poseLoaded ? " ✓" : ""}
+                  <button onClick={handleLoadPose} disabled={!selectedId}
+                    className="w-full py-1.5 rounded-lg text-xs font-semibold bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40 text-white transition-colors">
+                    📥 포즈 데이터 로드
                   </button>
+                  {poseInfo && (
+                    <p className="text-[10px] text-violet-400 leading-relaxed">{poseInfo}</p>
+                  )}
                 </>
               )
           }
         </Sec>
 
-        {/* ── 3. 카메라 앵글 ── */}
-        <Sec label="카메라 앵글">
+        {/* ── 3. 카메라 ── */}
+        <Sec label="카메라">
           <div className="grid grid-cols-2 gap-1">
-            {(["diagonal", "front", "side", "top"] as CamPreset[]).map((p) => (
+            {(["diagonal","front","side","top"] as CamPreset[]).map((p) => (
               <button key={p} onClick={() => setCamPreset(p)}
                 className={`py-1.5 rounded-lg text-[11px] font-semibold transition-colors ${
-                  camPreset === p ? "bg-violet-700 text-white" : "bg-zinc-800 text-zinc-400 hover:text-zinc-200"
+                  camPreset===p ? "bg-violet-700 text-white" : "bg-zinc-800 text-zinc-400 hover:text-zinc-200"
                 }`}>
                 {{ diagonal:"45°", front:"정면", side:"측면", top:"탑뷰" }[p]}
               </button>
@@ -722,25 +691,26 @@ export default function CharacterStudio() {
         </Sec>
 
         {/* ── 4. 재생 ── */}
-        <Sec label="재생">
+        <Sec label="재생 제어">
           {!isPlaying
             ? <button onClick={handlePlay} disabled={!poseLoaded}
-                className="w-full py-2 rounded-lg text-xs font-semibold bg-violet-700 hover:bg-violet-600 disabled:opacity-40 text-white transition-colors">
-                ▶ 재생
+                className="w-full py-2 rounded-lg text-sm font-bold bg-violet-700 hover:bg-violet-600 disabled:opacity-40 text-white transition-colors">
+                ▶ 재생 (루프)
               </button>
             : <button onClick={handleStop}
-                className="w-full py-2 rounded-lg text-xs font-semibold bg-zinc-700 hover:bg-zinc-600 text-white transition-colors">
-                ■ 정지 · T-pose 리셋
+                className="w-full py-2 rounded-lg text-sm font-bold bg-zinc-700 hover:bg-zinc-600 text-white transition-colors">
+                ■ 정지 · T-pose 복원
               </button>
           }
         </Sec>
 
         {/* ── 5. 영상 추출 ── */}
         <div className="mt-auto pt-3 border-t border-zinc-800 flex flex-col gap-2">
-          <p className="text-[10px] text-zinc-500 leading-relaxed">
+          <div className="text-[10px] text-zinc-500 leading-relaxed">
             <span className="text-zinc-400 font-semibold">Kling AI 모션 컨트롤 입력용</span><br />
-            블랙 배경 · 12 Mbps VP9 · 60fps WebM
-          </p>
+            블랙 배경 · 12 Mbps · VP9 · 60fps<br />
+            <span className="text-amber-500">⚠ 아래 버튼 클릭 시에만 녹화 시작</span>
+          </div>
           {!isRecording
             ? <button onClick={handleStartRecord} disabled={!poseLoaded}
                 className="w-full py-2.5 rounded-lg text-sm font-bold bg-red-700 hover:bg-red-600 disabled:opacity-40 text-white transition-colors">
@@ -774,6 +744,13 @@ export default function CharacterStudio() {
           <div className="absolute top-3 left-3 flex items-center gap-1.5 pointer-events-none">
             <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
             <span className="text-[11px] text-red-400 font-semibold select-none">REC · 12 Mbps</span>
+          </div>
+        )}
+
+        {!modelName && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 pointer-events-none">
+            <span className="text-5xl opacity-10">🎭</span>
+            <p className="text-sm text-zinc-700">캐릭터 로드 중…</p>
           </div>
         )}
       </div>
