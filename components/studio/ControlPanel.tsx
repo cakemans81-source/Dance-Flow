@@ -10,6 +10,8 @@ import {
   buildPoseData,
   getMotionSummaries,
   getMotionById,
+  uploadVideoToStorage,
+  updateMotionVideoUrl,
   type MotionFrame,
   type MotionSummary,
 } from "@/lib/supabase";
@@ -172,6 +174,7 @@ export default function ControlPanel({
   const audioRef = useRef<HTMLAudioElement>(null);
   const prevVideoUrlRef = useRef<string | null>(null);
   const prevAudioUrlRef = useRef<string | null>(null);
+  const videoFileRef = useRef<File | null>(null);
 
   // ── Direct 모드: 상태 ────────────────────────────────────────────────────────
   const [directAudioUrl, setDirectAudioUrl] = useState<string | null>(null);
@@ -359,6 +362,7 @@ export default function ControlPanel({
     if (prevVideoUrlRef.current) URL.revokeObjectURL(prevVideoUrlRef.current);
     const url = URL.createObjectURL(file);
     prevVideoUrlRef.current = url;
+    videoFileRef.current = file;
     setVideoUrl(url);
     setIsPlaying(false);
     setCurrentTime(0);
@@ -465,6 +469,16 @@ export default function ControlPanel({
       const poseData = buildPoseData(savedRecording);
       const { id } = await saveMotion(pendingMotionName.trim(), savedRecording, poseData);
       console.log(`[DanceFlow] 저장 완료 → id: ${id}, name: "${pendingMotionName.trim()}", frames: ${savedRecording.length}, fps: ${poseData.meta.fps}`);
+
+      // 원본 영상이 있으면 Supabase Storage에 업로드 후 video_url 저장
+      if (videoFileRef.current) {
+        const publicUrl = await uploadVideoToStorage(videoFileRef.current, id);
+        if (publicUrl) {
+          await updateMotionVideoUrl(id, publicUrl);
+          console.log(`[DanceFlow] 영상 업로드 완료 → ${publicUrl}`);
+        }
+      }
+
       setSaveStatus("success");
       setSaveRefreshKey((k) => k + 1);
       onSaveSuccess?.(pendingMotionName.trim());
