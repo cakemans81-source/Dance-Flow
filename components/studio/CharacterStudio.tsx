@@ -240,8 +240,9 @@ function retargetBone(bone: THREE.Bone, rest: BoneRest, targetDir: THREE.Vector3
 // rest(T) pose 기준 최대 허용 회전각 — 이 범위 초과 시 SLERP로 강제 복원
 // Kling AI 인물 인식 최적화 기준: 실제 댄서 가동범위 상한선
 const JOINT_LIMITS: Record<string, number> = {
-  shoulder: 105, // 어깨: 팔 들기 최대 (수평+약간 위)
-  elbow:    145, // 팔꿈치: 해부학적 최대 굴곡 145° (Twist는 stripTwist로 별도 제거)
+  clavicle:  40, // 쇄골: 팔 올릴 때 흉부 메쉬 붕괴 방지 (자동 쇄골 동기화)
+  shoulder: 135, // 어깨: 팔 교차·머리 위 동작 포함 (댄스 가동범위 확보)
+  elbow:    145, // 팔꿈치: 해부학적 최대 굴곡 (Twist는 stripTwist로 별도 제거)
   hip:      100, // 고관절
   knee:      95, // 무릎: 힌지 — 과신전 원천 차단
   spine:     30, // 척추: 전체 합계 30° — 폴딩 완전 차단
@@ -397,8 +398,8 @@ function applyPose(
   // local Q를 계산 → 오징어 현상 발생 (핵심 버그 수정)
   modelRoot.updateMatrixWorld(true);
 
-  // ── STEP 3: 팔·다리 retarget + 클램프 (부모→자식 순서) ─────────────────
-  // Ball-joint: 모든 방향 회전 허용 (어깨, 고관절)
+  // ── STEP 3: 쇄골 → 위팔 → 전완 → 다리 (부모→자식 순서) ──────────────────
+  // Ball-joint: 모든 방향 회전 허용
   const apC = (key: BoneKey, dir: THREE.Vector3, limitDeg: number) => {
     const b = bones[key], r = rest.get(key);
     if (!b || !r) return;
@@ -415,10 +416,19 @@ function applyPose(
     clampFromRest(b, r, limitDeg);
   };
 
-  // 팔: 위팔(Ball-joint) → 전완(Hinge-joint) 순서
-  apC("leftArm",           new THREE.Vector3().subVectors(le, ls), JOINT_LIMITS.shoulder);
+  // ★ 3a: 쇄골(Clavicle) 먼저 — 흉부 메쉬 붕괴 원천 차단
+  // 팔이 크게 움직일 때 leftShoulder/rightShoulder도 동기화해야
+  // 흉부와 어깨 사이 메쉬가 접히지 않음 (auto-clavicle)
+  // 팔 방향(le-ls)과 같은 방향 사용 → 쇄골이 위팔을 자연스럽게 선행
+  const lArmDir = new THREE.Vector3().subVectors(le, ls);
+  const rArmDir = new THREE.Vector3().subVectors(re, rs);
+  apC("leftShoulder",  lArmDir, JOINT_LIMITS.clavicle);
+  apC("rightShoulder", rArmDir, JOINT_LIMITS.clavicle);
+
+  // 3b: 위팔(Ball-joint) → 전완(Hinge-joint) 순서
+  apC("leftArm",           lArmDir, JOINT_LIMITS.shoulder);
   apCHinge("leftForeArm",  new THREE.Vector3().subVectors(lw, le), JOINT_LIMITS.elbow);
-  apC("rightArm",          new THREE.Vector3().subVectors(re, rs), JOINT_LIMITS.shoulder);
+  apC("rightArm",          rArmDir, JOINT_LIMITS.shoulder);
   apCHinge("rightForeArm", new THREE.Vector3().subVectors(rw, re), JOINT_LIMITS.elbow);
 
   // 다리 (고관절 → 발목 순서)
