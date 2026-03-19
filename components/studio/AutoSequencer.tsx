@@ -421,7 +421,7 @@ export default function AutoSequencer() {
             {phase !== "playing" ? (
               <button
                 onClick={handlePlay}
-                disabled={isbusy || phase === "exporting"}
+                disabled={isbusy}
                 className="flex-1 py-2 rounded-lg text-xs font-semibold bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
               >
                 {phase === "loading" ? "로드 중…" : "▶ 미리보기"}
