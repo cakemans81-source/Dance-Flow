@@ -465,6 +465,7 @@ function setupLighting(scene: THREE.Scene): void {
 // ══════════════════════════════════════════════════════════════════════════════
 export default function CharacterStudio() {
   const canvasRef  = useRef<HTMLCanvasElement>(null);
+  const videoRef   = useRef<HTMLVideoElement>(null); // 비교 레퍼런스 영상
   const sceneRef   = useRef<SceneRefs | null>(null);
   const modelRef   = useRef<THREE.Object3D | null>(null);
   const bonesRef   = useRef<HumanoidBones>({});
@@ -496,6 +497,7 @@ export default function CharacterStudio() {
   const [camPreset,   setCamPreset]   = useState<CamPreset>("front");
   const [status,      setStatus]      = useState("기본 캐릭터 로드 중…");
   const [dbLoading,   setDbLoading]   = useState(true);
+  const [refVideoUrl, setRefVideoUrl] = useState<string | null>(null); // 비교 영상
 
   // ── DB 모션 목록 ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -753,6 +755,24 @@ export default function CharacterStudio() {
     }
   }, [selectedId]);
 
+  // ── 비교 영상 파일 핸들러 ─────────────────────────────────────────────────
+  const handleRefVideoDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (!file || !file.type.startsWith("video/")) return;
+    if (refVideoUrl) URL.revokeObjectURL(refVideoUrl);
+    setRefVideoUrl(URL.createObjectURL(file));
+  }, [refVideoUrl]);
+
+  const handleRefVideoInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (refVideoUrl) URL.revokeObjectURL(refVideoUrl);
+    setRefVideoUrl(URL.createObjectURL(file));
+  }, [refVideoUrl]);
+
+  useEffect(() => () => { if (refVideoUrl) URL.revokeObjectURL(refVideoUrl); }, [refVideoUrl]);
+
   // ── 재생 ─────────────────────────────────────────────────────────────────
   const handlePlay = useCallback(() => {
     if (!modelRef.current) { setStatus("모델 로드 대기 중입니다."); return; }
@@ -761,6 +781,8 @@ export default function CharacterStudio() {
     startRef.current   = performance.now();
     playingRef.current = true;
     setIsPlaying(true);
+    // 비교 영상 동기 재생 (처음부터)
+    if (videoRef.current) { videoRef.current.currentTime = 0; videoRef.current.play().catch(() => {}); }
     setStatus("▶ 재생 중… (루프)");
   }, []);
 
@@ -770,6 +792,8 @@ export default function CharacterStudio() {
     setIsPlaying(false);
     prevLmsRef.current = null;
     resetTpose(bonesRef.current, restRef.current);
+    // 비교 영상 동기 정지
+    if (videoRef.current) { videoRef.current.pause(); videoRef.current.currentTime = 0; }
     setStatus("■ 정지 — T-pose 복원");
   }, []);
 
@@ -952,29 +976,94 @@ export default function CharacterStudio() {
         </div>
       </div>
 
-      {/* ── 우측: Three.js 캔버스 ── */}
-      <div className="flex-1 relative overflow-hidden bg-black">
-        <canvas ref={canvasRef} className="block w-full h-full" />
+      {/* ── 우측 영역: 비교영상 + 3D캔버스 ── */}
+      <div className="flex-1 flex overflow-hidden">
 
-        {isPlaying && (
-          <div className="absolute top-3 right-3 flex items-center gap-1.5 pointer-events-none">
-            <span className="w-2 h-2 rounded-full bg-violet-500 animate-pulse" />
-            <span className="text-[11px] text-violet-400 font-semibold select-none">LIVE</span>
-          </div>
-        )}
-        {isRecording && (
-          <div className="absolute top-3 left-3 flex items-center gap-1.5 pointer-events-none">
-            <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-            <span className="text-[11px] text-red-400 font-semibold select-none">REC · 12 Mbps</span>
-          </div>
-        )}
+        {/* ── 비교 레퍼런스 영상 패널 ── */}
+        <div
+          className={`relative bg-black border-r border-zinc-800 flex flex-col transition-all duration-300 ${refVideoUrl ? "w-[42%]" : "w-[120px]"}`}
+          onDrop={handleRefVideoDrop}
+          onDragOver={(e) => e.preventDefault()}
+        >
+          {refVideoUrl ? (
+            <>
+              {/* 영상 */}
+              <video
+                ref={videoRef}
+                src={refVideoUrl}
+                loop
+                muted
+                playsInline
+                className="w-full h-full object-contain"
+              />
+              {/* 레이블 */}
+              <div className="absolute top-2 left-2 flex items-center gap-1.5 pointer-events-none">
+                <span className="text-[10px] font-bold text-amber-400 bg-black/60 px-2 py-0.5 rounded">원본 댄서</span>
+              </div>
+              {/* 영상 제거 버튼 */}
+              <button
+                onClick={() => { if (refVideoUrl) URL.revokeObjectURL(refVideoUrl); setRefVideoUrl(null); }}
+                className="absolute top-2 right-2 w-5 h-5 rounded-full bg-black/60 text-zinc-400 hover:text-white text-[10px] flex items-center justify-center"
+              >✕</button>
+              {/* 동기 상태 표시 */}
+              {isPlaying && (
+                <div className="absolute bottom-2 left-2 flex items-center gap-1 pointer-events-none">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                  <span className="text-[9px] text-amber-400 font-semibold">SYNC</span>
+                </div>
+              )}
+            </>
+          ) : (
+            /* 드롭 존 */
+            <div
+              className="flex-1 flex flex-col items-center justify-center gap-2 cursor-pointer select-none"
+              onClick={() => document.getElementById("cs-ref-video-input")?.click()}
+            >
+              <span className="text-2xl opacity-20">🎬</span>
+              <p className="text-[9px] text-zinc-600 text-center leading-relaxed px-2">
+                원본 영상<br />드롭 또는 클릭
+              </p>
+            </div>
+          )}
+          <input
+            id="cs-ref-video-input"
+            type="file"
+            accept="video/*"
+            className="hidden"
+            onChange={handleRefVideoInput}
+          />
+        </div>
 
-        {!modelName && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 pointer-events-none">
-            <span className="text-5xl opacity-10">🎭</span>
-            <p className="text-sm text-zinc-700">캐릭터 로드 중…</p>
+        {/* ── Three.js 캔버스 ── */}
+        <div className="flex-1 relative overflow-hidden bg-black">
+          <canvas ref={canvasRef} className="block w-full h-full" />
+
+          {/* 3D 레이블 */}
+          <div className="absolute top-2 left-2 pointer-events-none">
+            <span className="text-[10px] font-bold text-violet-400 bg-black/60 px-2 py-0.5 rounded">3D 캐릭터</span>
           </div>
-        )}
+
+          {isPlaying && (
+            <div className="absolute top-2 right-2 flex items-center gap-1.5 pointer-events-none">
+              <span className="w-2 h-2 rounded-full bg-violet-500 animate-pulse" />
+              <span className="text-[11px] text-violet-400 font-semibold select-none">LIVE</span>
+            </div>
+          )}
+          {isRecording && (
+            <div className="absolute top-8 right-2 flex items-center gap-1.5 pointer-events-none">
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              <span className="text-[11px] text-red-400 font-semibold select-none">REC</span>
+            </div>
+          )}
+
+          {!modelName && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 pointer-events-none">
+              <span className="text-5xl opacity-10">🎭</span>
+              <p className="text-sm text-zinc-700">캐릭터 로드 중…</p>
+            </div>
+          )}
+        </div>
+
       </div>
     </div>
   );
