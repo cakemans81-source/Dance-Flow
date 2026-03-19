@@ -134,24 +134,36 @@ function findBones(root: THREE.Object3D): HumanoidBones {
   return result;
 }
 
-/** T-pose 월드 방향 & 쿼터니언 캡처 (scene.add + updateMatrixWorld 후 호출) */
+/**
+ * T-pose 월드 방향 & 쿼터니언 캡처 (scene.add + updateMatrixWorld 후 호출)
+ *
+ * ★ 핵심: 본 방향(worldDir) = 로컬 +Y를 월드 공간으로 변환
+ *
+ * Mixamo 컨벤션: 로컬 +Y = 본 길이 방향 (head→tail, proximal→distal)
+ *   Spine2  → (0, +1, 0) 세계 방향 (위쪽) ← 자식 위치 기반 시 LeftShoulder(옆)로 오산!
+ *   LeftArm → (-1,  0, 0) 세계 방향 (왼쪽)
+ *   LeftUpLeg → (0, -1, 0) 세계 방향 (아래쪽)
+ *
+ * 기존 child 위치 기반 방법의 치명적 버그:
+ *   Spine2의 첫 번째 자식 = LeftShoulder (분기 본)
+ *   → worldDir = 옆쪽(-X) → retargetBone이 척추를 90° 옆으로 꺾음 → 상체 붕괴!
+ *
+ * localBoneAxis = 항상 (0,1,0) (로컬 +Y) — Swing-Twist 분리 twist 축
+ */
 function captureRest(bones: HumanoidBones): Map<BoneKey, BoneRest> {
   const map = new Map<BoneKey, BoneRest>();
+  const LOCAL_Y = new THREE.Vector3(0, 1, 0);
   for (const [key, bone] of Object.entries(bones) as [BoneKey, THREE.Bone][]) {
     if (!bone) continue;
     const wq = new THREE.Quaternion(); bone.getWorldQuaternion(wq);
-    const wp = new THREE.Vector3();   bone.getWorldPosition(wp);
-    let dir = new THREE.Vector3(0, 1, 0);
-    for (const ch of bone.children) {
-      if (ch instanceof THREE.Bone) {
-        const cp = new THREE.Vector3(); ch.getWorldPosition(cp);
-        dir = cp.clone().sub(wp).normalize(); break;
-      }
-    }
-    // 본 장축을 LOCAL space로 변환 (세계 방향 → 본 로컬 좌표계)
-    // Swing-Twist 분리 시 twist 축으로 사용 (팔꿈치 Candy-wrapper 방지)
-    const localBoneAxis = dir.clone().applyQuaternion(wq.clone().invert()).normalize();
-    map.set(key, { worldDir: dir, worldQuat: wq.clone(), localQuat: bone.quaternion.clone(), localBoneAxis });
+    // 로컬 +Y → 월드 공간 = 본의 실제 길이 방향 (child 위치 불필요)
+    const dir = LOCAL_Y.clone().applyQuaternion(wq).normalize();
+    map.set(key, {
+      worldDir:      dir,
+      worldQuat:     wq.clone(),
+      localQuat:     bone.quaternion.clone(),
+      localBoneAxis: LOCAL_Y.clone(), // 로컬 +Y = 본 장축 (모든 본에서 일정)
+    });
   }
   return map;
 }
