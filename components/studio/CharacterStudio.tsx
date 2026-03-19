@@ -171,15 +171,21 @@ function interpLms(frames: CompactFrame[], ts: number): LMData {
 }
 
 /**
- * MP world lm → Three.js 벡터
- * MP world: x=우(캐릭터 기준), y=아래, z=카메라쪽 양수
- * THREE:     x=우,              y=위,   z=카메라쪽 양수
- * → y만 반전
+ * MP world lm → Three.js 벡터 (좌우 미러 보정 포함)
+ *
+ * MediaPipe poseWorldLandmarks x축:
+ *   양수 = 카메라 기준 오른쪽 = 피사체 기준 왼쪽
+ *   → 그대로 쓰면 캐릭터가 "후면 기준"으로 움직임 (좌우 반전)
+ *
+ * 수정: x를 반전(-l[0])해 피사체 LEFT → 캐릭터 LEFT 정렬
+ *   x: -l[0]  (좌우 미러 보정)
+ *   y: -l[1]  (MP y↓ → Three.js y↑)
+ *   z:  l[2]  (동일 방향)
  */
 function lmv(lm: LMData, i: number): THREE.Vector3 {
   const l = lm[i];
   if (!l) return new THREE.Vector3();
-  return new THREE.Vector3(l[0], -l[1], l[2]); // y 반전만 (z는 동일 방향)
+  return new THREE.Vector3(-l[0], -l[1], l[2]); // x 반전(전면 기준 보정) + y 반전
 }
 
 /**
