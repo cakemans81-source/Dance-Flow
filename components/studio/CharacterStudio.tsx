@@ -214,6 +214,10 @@ function retargetBone(bone: THREE.Bone, rest: BoneRest, targetDir: THREE.Vector3
   bone.quaternion.copy(_qc).normalize();    // normalize — fp 오차 누적 방지
   bone.scale.setScalar(1);                  // LBS 스트레칭 원천 차단
   bone.updateMatrix();
+  // ★ CRITICAL: 자식 본이 이 프레임의 정확한 parentWorldQ를 읽도록 즉시 갱신
+  // 없으면 leftForeArm/leftLeg 등이 직전 프레임 stale matrixWorld로 localQ 계산
+  // → 허벅지/전완 꽈배기 현상의 진짜 원인
+  bone.updateWorldMatrix(false, false);
 }
 
 // ── 해부학적 관절 각도 상수 ─────────────────────────────────────────────────────
@@ -250,6 +254,7 @@ function clampFromRest(bone: THREE.Bone, rest: BoneRest, maxDeg: number): void {
     bone.quaternion.copy(_qb).normalize();
     bone.scale.setScalar(1); // 클램프 후에도 스케일 보장
     bone.updateMatrix();
+    bone.updateWorldMatrix(false, false); // 클램프 후에도 world matrix 즉시 반영
   }
 }
 
@@ -372,6 +377,7 @@ function lockHandsToRest(handRest: Map<THREE.Bone, THREE.Quaternion>): void {
     bone.quaternion.copy(q);
     bone.scale.setScalar(1);
     bone.updateMatrix();
+    bone.updateWorldMatrix(false, false);
   }
 }
 
