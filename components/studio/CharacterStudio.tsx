@@ -94,11 +94,12 @@ interface SceneRefs {
 }
 
 // ── 카메라 프리셋 ──────────────────────────────────────────────────────────────
+// front = Kling AI 제출용 표준 뷰 (머리~발끝 전신, 눈높이 약간 위)
 const CAM: Record<CamPreset, { pos: [number,number,number]; tgt: [number,number,number] }> = {
-  diagonal: { pos: [2.5, 1.6, 2.8],  tgt: [0, 0.9, 0] },
-  front:    { pos: [0,   1.5, 4.0],  tgt: [0, 0.9, 0] },
-  side:     { pos: [4.0, 1.5, 0],    tgt: [0, 0.9, 0] },
-  top:      { pos: [0,   6,   0.1],  tgt: [0, 0,   0] },
+  front:    { pos: [0,   1.1, 4.2],  tgt: [0, 0.85, 0] }, // 전면 전신 (기본)
+  diagonal: { pos: [1.8, 1.2, 3.2],  tgt: [0, 0.85, 0] }, // 사선 45°
+  side:     { pos: [4.0, 1.1, 0.3],  tgt: [0, 0.85, 0] }, // 측면
+  top:      { pos: [0,   6,   0.1],  tgt: [0, 0,    0] }, // 하이앵글
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -209,14 +210,15 @@ function retargetBone(bone: THREE.Bone, rest: BoneRest, targetDir: THREE.Vector3
   bone.updateMatrix();
 }
 
-// ── 해부학적 관절 각도 상수 (LBS Candy-Wrapper 아티팩트 원천 차단) ─────────────
-// rest pose 기준 최대 회전 — 이 범위 초과 시 rest 방향으로 SLERP 클램프
+// ── 해부학적 관절 각도 상수 ─────────────────────────────────────────────────────
+// rest(T) pose 기준 최대 허용 회전각 — 이 범위 초과 시 SLERP로 강제 복원
+// Kling AI 인물 인식 최적화 기준: 실제 댄서 가동범위 상한선
 const JOINT_LIMITS: Record<string, number> = {
-  shoulder: 155, // 어깨: 높은 자유도지만 역방향 꺾임 방지
-  elbow:    135, // 팔꿈치: 힌지 관절 — 과신전 절대 불가
-  hip:      145, // 고관절
-  knee:     140, // 무릎: 힌지
-  spine:    60,  // 척추: 과도한 비틀림 방지
+  shoulder: 105, // 어깨: 팔 들기 최대 (수평+약간 위)
+  elbow:     90, // 팔꿈치: 힌지 — 완전 굽힘 이상 절대 불가
+  hip:      100, // 고관절
+  knee:      95, // 무릎: 힌지 — 과신전 원천 차단
+  spine:     30, // 척추: 전체 합계 30° — 폴딩 완전 차단
 };
 
 /**
@@ -245,8 +247,48 @@ function clampFromRest(bone: THREE.Bone, rest: BoneRest, maxDeg: number): void {
   }
 }
 
-/** 전체 포즈 적용 — 부모→자식 순서, 관절 각도 클램프 포함 */
-function applyPose(lm: LMData, bones: HumanoidBones, rest: Map<BoneKey, BoneRest>): void {
+/**
+ * 인간 포즈 유효성 검사 — 오징어 자세 감지 시 true 반환
+ *
+ * poseWorldLandmarks 기준 (힙 = 원점, y↑ 변환 후):
+ *  - 어깨 중심 y > 0 (힙보다 위)
+ *  - 척추 방향이 충분히 수직 (y 성분 > 0.2)
+ *  - 어깨 폭 최소 보장 (트래킹 실패 감지)
+ */
+function validateHumanPose(lm: LMData): boolean {
+  if (lm.length < 29) return false;
+  const ls = lmv(lm, LM.L_SHOULDER), rs = lmv(lm, LM.R_SHOULDER);
+  const lh = lmv(lm, LM.L_HIP),     rh = lmv(lm, LM.R_HIP);
+  const sc = new THREE.Vector3().addVectors(ls, rs).multiplyScalar(0.5);
+  const hc = new THREE.Vector3().addVectors(lh, rh).multiplyScalar(0.5);
+  // (1) 어깨가 힙보다 위에 있어야 함
+  if (sc.y < hc.y + 0.05) return false;
+  // (2) 척추가 뒤집히지 않아야 함 (y 성분 양수 = 위를 향함)
+  const spineDir = new THREE.Vector3().subVectors(sc, hc).normalize();
+  if (spineDir.y < 0.2) return false;
+  // (3) 어깨 폭 최소값 — 트래킹 실패 or 정면 완전 가림 감지
+  if (ls.distanceTo(rs) < 0.05) return false;
+  return true;
+}
+
+/**
+ * 전체 포즈 적용 — 부모→자식 순서, 관절 클램프, stale-matrix 버그 수정
+ *
+ * ⚠️ CRITICAL: retargetBone 은 bone.parent.getWorldQuaternion() 을 읽는다.
+ *   getWorldQuaternion 은 bone.matrixWorld 를 분해하는데, matrixWorld 는
+ *   renderer.render() 시점에 갱신된다 (이전 프레임 값).
+ *   척추를 retarget한 뒤 바로 팔을 retarget하면 팔 부모의 matrixWorld가
+ *   "척추 변형 반영 전" 값 → 잘못된 local Q → 오징어 꼬임 발생.
+ *
+ *   수정: 척추 retarget 직후 updateWorldMatrix(false, true) 로
+ *   자손 전체의 matrixWorld를 즉시 전파한 뒤 팔/다리를 처리한다.
+ */
+function applyPose(
+  lm: LMData,
+  bones: HumanoidBones,
+  rest: Map<BoneKey, BoneRest>,
+  modelRoot: THREE.Object3D,  // stale-matrix 전파용
+): void {
   if (!lm.length) return;
 
   const ls = lmv(lm, LM.L_SHOULDER), rs = lmv(lm, LM.R_SHOULDER);
@@ -260,14 +302,19 @@ function applyPose(lm: LMData, bones: HumanoidBones, rest: Map<BoneKey, BoneRest
   const shoulderC = new THREE.Vector3().addVectors(ls, rs).multiplyScalar(0.5);
   const spineDir  = new THREE.Vector3().subVectors(shoulderC, hipC);
 
-  // 척추: 최상단 본 하나에만 + 과비틀림 제한
+  // ── STEP 1: 척추 retarget + 클램프 ──────────────────────────────────────
   const topSpine = (["spine2", "spine1", "spine"] as BoneKey[]).find((k) => bones[k]);
   if (topSpine) {
-    const r = rest.get(topSpine);
-    if (r) { retargetBone(bones[topSpine]!, r, spineDir); clampFromRest(bones[topSpine]!, r, JOINT_LIMITS.spine); }
+    const b = bones[topSpine]!, r = rest.get(topSpine);
+    if (r) { retargetBone(b, r, spineDir); clampFromRest(b, r, JOINT_LIMITS.spine); }
   }
 
-  // 팔·다리 — retarget 직후 clamp (부모→자식 순서 필수)
+  // ── STEP 2: 척추 변형을 자손 world matrix에 즉시 전파 ──────────────────
+  // 이 호출이 없으면 팔/다리 본이 이전 프레임의 stale matrixWorld로
+  // local Q를 계산 → 오징어 현상 발생 (핵심 버그 수정)
+  modelRoot.updateMatrixWorld(true);
+
+  // ── STEP 3: 팔·다리 retarget + 클램프 (부모→자식 순서) ─────────────────
   const apC = (key: BoneKey, dir: THREE.Vector3, limitDeg: number) => {
     const b = bones[key], r = rest.get(key);
     if (!b || !r) return;
@@ -275,13 +322,13 @@ function applyPose(lm: LMData, bones: HumanoidBones, rest: Map<BoneKey, BoneRest
     clampFromRest(b, r, limitDeg);
   };
 
-  // ── 팔 (어깨 → 전완 순서) ──────────────────────────────────────────────────
+  // 팔 (어깨 → 전완 순서)
   apC("leftArm",      new THREE.Vector3().subVectors(le, ls), JOINT_LIMITS.shoulder);
   apC("leftForeArm",  new THREE.Vector3().subVectors(lw, le), JOINT_LIMITS.elbow);
   apC("rightArm",     new THREE.Vector3().subVectors(re, rs), JOINT_LIMITS.shoulder);
   apC("rightForeArm", new THREE.Vector3().subVectors(rw, re), JOINT_LIMITS.elbow);
 
-  // ── 다리 (고관절 → 발목 순서) ────────────────────────────────────────────
+  // 다리 (고관절 → 발목 순서)
   apC("leftUpLeg",  new THREE.Vector3().subVectors(lk, lh), JOINT_LIMITS.hip);
   apC("leftLeg",    new THREE.Vector3().subVectors(la, lk), JOINT_LIMITS.knee);
   apC("rightUpLeg", new THREE.Vector3().subVectors(rk, rh), JOINT_LIMITS.hip);
@@ -343,7 +390,7 @@ export default function CharacterStudio() {
   const [isPlaying,   setIsPlaying]   = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordUrl,   setRecordUrl]   = useState<string | null>(null);
-  const [camPreset,   setCamPreset]   = useState<CamPreset>("diagonal");
+  const [camPreset,   setCamPreset]   = useState<CamPreset>("front");
   const [status,      setStatus]      = useState("기본 캐릭터 로드 중…");
   const [dbLoading,   setDbLoading]   = useState(true);
 
@@ -371,12 +418,15 @@ export default function CharacterStudio() {
     scene.background = new THREE.Color(0x000000);
 
     const camera = new THREE.PerspectiveCamera(45, 1, 0.001, 1000);
-    camera.position.set(...CAM.diagonal.pos);
+    camera.position.set(...CAM.front.pos);
 
     const controls = new OrbitControls(camera, canvas);
     controls.enableDamping = true; controls.dampingFactor = 0.05;
     controls.minDistance = 0.2; controls.maxDistance = 100;
-    controls.target.set(...CAM.diagonal.tgt); controls.update();
+    // 수직 회전 제한 — 바닥 시선 앵글 방지 (Kling AI 인식률 저하 원인)
+    controls.minPolarAngle = Math.PI * 0.15; // 하늘 방향 75° 이내
+    controls.maxPolarAngle = Math.PI * 0.72; // 바닥 방향 130° 이내
+    controls.target.set(...CAM.front.tgt); controls.update();
 
     setupLighting(scene);
 
@@ -420,7 +470,12 @@ export default function CharacterStudio() {
           : raw;
         prevLmsRef.current = lms;
 
-        applyPose(lms, bonesRef.current, restRef.current);
+        // 인간 포즈 유효성 검사 — 오징어 자세 감지 시 T-pose 강제 복원
+        if (validateHumanPose(lms) && modelRef.current) {
+          applyPose(lms, bonesRef.current, restRef.current, modelRef.current);
+        } else if (!validateHumanPose(lms)) {
+          resetTpose(bonesRef.current, restRef.current);
+        }
       }
 
       renderer.render(scene, camera);
