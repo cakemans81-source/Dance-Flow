@@ -204,11 +204,48 @@ function retargetBone(bone: THREE.Bone, rest: BoneRest, targetDir: THREE.Vector3
     _qc.invert();
   }
   _qc.multiply(_qa);                        // localQ = invParent × newWorldQ
-  bone.quaternion.copy(_qc);
+  bone.quaternion.copy(_qc).normalize();    // normalize — fp 오차 누적 방지
+  bone.scale.setScalar(1);                  // LBS 스트레칭 원천 차단
   bone.updateMatrix();
 }
 
-/** 전체 포즈 적용 — 부모→자식 순서 보장 */
+// ── 해부학적 관절 각도 상수 (LBS Candy-Wrapper 아티팩트 원천 차단) ─────────────
+// rest pose 기준 최대 회전 — 이 범위 초과 시 rest 방향으로 SLERP 클램프
+const JOINT_LIMITS: Record<string, number> = {
+  shoulder: 155, // 어깨: 높은 자유도지만 역방향 꺾임 방지
+  elbow:    135, // 팔꿈치: 힌지 관절 — 과신전 절대 불가
+  hip:      145, // 고관절
+  knee:     140, // 무릎: 힌지
+  spine:    60,  // 척추: 과도한 비틀림 방지
+};
+
+/**
+ * 관절 각도 클램프 — rest pose 기준 angular distance를 maxDeg 이내로 제한
+ *
+ * 원리:
+ *   현재 localQ와 restLocalQ 사이의 각도(halfAngle)가 maxDeg/2 초과 시
+ *   SLERP(rest, current, limit/halfAngle) 로 당겨 줌
+ *
+ * 주의: _qa, _qb 를 재사용 — retargetBone 완료 후에만 호출할 것
+ */
+function clampFromRest(bone: THREE.Bone, rest: BoneRest, maxDeg: number): void {
+  const HALF_MAX = (maxDeg * Math.PI) / 360; // half-angle threshold (rad)
+  _qa.copy(bone.quaternion).normalize();
+  _qb.copy(rest.localQuat).normalize();
+  // 최단 호 보장 (부호 통일)
+  if (_qa.dot(_qb) < 0) { _qa.x = -_qa.x; _qa.y = -_qa.y; _qa.z = -_qa.z; _qa.w = -_qa.w; }
+  const dot = Math.min(1.0, Math.max(-1.0, _qa.dot(_qb)));
+  const halfAngle = Math.acos(dot); // 현재 회전 반각
+  if (halfAngle > HALF_MAX && halfAngle > 1e-6) {
+    // _qb = slerp(rest, current, HALF_MAX/halfAngle) — 한계 각도로 당김
+    _qb.slerp(_qa, HALF_MAX / halfAngle);
+    bone.quaternion.copy(_qb).normalize();
+    bone.scale.setScalar(1); // 클램프 후에도 스케일 보장
+    bone.updateMatrix();
+  }
+}
+
+/** 전체 포즈 적용 — 부모→자식 순서, 관절 각도 클램프 포함 */
 function applyPose(lm: LMData, bones: HumanoidBones, rest: Map<BoneKey, BoneRest>): void {
   if (!lm.length) return;
 
@@ -223,28 +260,39 @@ function applyPose(lm: LMData, bones: HumanoidBones, rest: Map<BoneKey, BoneRest
   const shoulderC = new THREE.Vector3().addVectors(ls, rs).multiplyScalar(0.5);
   const spineDir  = new THREE.Vector3().subVectors(shoulderC, hipC);
 
-  // 척추: 최상단 본 하나에만 (중복 과회전 방지)
+  // 척추: 최상단 본 하나에만 + 과비틀림 제한
   const topSpine = (["spine2", "spine1", "spine"] as BoneKey[]).find((k) => bones[k]);
-  if (topSpine) { const r = rest.get(topSpine); if (r) retargetBone(bones[topSpine]!, r, spineDir); }
+  if (topSpine) {
+    const r = rest.get(topSpine);
+    if (r) { retargetBone(bones[topSpine]!, r, spineDir); clampFromRest(bones[topSpine]!, r, JOINT_LIMITS.spine); }
+  }
 
-  // 팔·다리 (부모→자식 순서)
-  const ap = (key: BoneKey, dir: THREE.Vector3) => {
-    const b = bones[key], r = rest.get(key); if (b && r) retargetBone(b, r, dir);
+  // 팔·다리 — retarget 직후 clamp (부모→자식 순서 필수)
+  const apC = (key: BoneKey, dir: THREE.Vector3, limitDeg: number) => {
+    const b = bones[key], r = rest.get(key);
+    if (!b || !r) return;
+    retargetBone(b, r, dir);
+    clampFromRest(b, r, limitDeg);
   };
-  ap("leftArm",      new THREE.Vector3().subVectors(le, ls));
-  ap("leftForeArm",  new THREE.Vector3().subVectors(lw, le));
-  ap("rightArm",     new THREE.Vector3().subVectors(re, rs));
-  ap("rightForeArm", new THREE.Vector3().subVectors(rw, re));
-  ap("leftUpLeg",    new THREE.Vector3().subVectors(lk, lh));
-  ap("leftLeg",      new THREE.Vector3().subVectors(la, lk));
-  ap("rightUpLeg",   new THREE.Vector3().subVectors(rk, rh));
-  ap("rightLeg",     new THREE.Vector3().subVectors(ra, rk));
+
+  // ── 팔 (어깨 → 전완 순서) ──────────────────────────────────────────────────
+  apC("leftArm",      new THREE.Vector3().subVectors(le, ls), JOINT_LIMITS.shoulder);
+  apC("leftForeArm",  new THREE.Vector3().subVectors(lw, le), JOINT_LIMITS.elbow);
+  apC("rightArm",     new THREE.Vector3().subVectors(re, rs), JOINT_LIMITS.shoulder);
+  apC("rightForeArm", new THREE.Vector3().subVectors(rw, re), JOINT_LIMITS.elbow);
+
+  // ── 다리 (고관절 → 발목 순서) ────────────────────────────────────────────
+  apC("leftUpLeg",  new THREE.Vector3().subVectors(lk, lh), JOINT_LIMITS.hip);
+  apC("leftLeg",    new THREE.Vector3().subVectors(la, lk), JOINT_LIMITS.knee);
+  apC("rightUpLeg", new THREE.Vector3().subVectors(rk, rh), JOINT_LIMITS.hip);
+  apC("rightLeg",   new THREE.Vector3().subVectors(ra, rk), JOINT_LIMITS.knee);
 }
 
-/** T-pose 리셋 */
+/** T-pose 리셋 — 쿼터니언 + 스케일 완전 복원 */
 function resetTpose(bones: HumanoidBones, rest: Map<BoneKey, BoneRest>): void {
   for (const [key, r] of rest) {
-    const b = bones[key as BoneKey]; if (b) { b.quaternion.copy(r.localQuat); b.updateMatrix(); }
+    const b = bones[key as BoneKey];
+    if (b) { b.quaternion.copy(r.localQuat); b.scale.setScalar(1); b.updateMatrix(); }
   }
 }
 
